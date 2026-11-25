@@ -1,5 +1,6 @@
 # PocketKeyboard
 
+![preview](./images/preview.png)
 <p align="center">
   <b>Emergency USB HID Virtual Keyboard &amp; Trackpad for Rooted Android Devices</b><br>
   Built with Jetpack Compose &amp; Material You (Material 3)
