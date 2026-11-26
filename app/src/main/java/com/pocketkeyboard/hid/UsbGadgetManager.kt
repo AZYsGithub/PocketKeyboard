@@ -14,17 +14,19 @@ data class GadgetEnvironment(
     val configFsPath: String? = null,
     val hidDevicePath: String? = null,
     val mouseDevicePath: String? = null,
+    val gamepadDevicePath: String? = null,
     val udcName: String? = null,
     val hasGadgetFs: Boolean = false
 )
 
 data class EnabledHidDevices(
     val keyboardPath: String,
-    val mousePath: String?
+    val mousePath: String?,
+    val gamepadPath: String? = null
 )
 
 /**
- * Manages the USB HID gadget lifecycle (Keyboard + Mouse) across Linux ConfigFS,
+ * Manages the USB HID gadget lifecycle (Keyboard + Mouse + Gamepad) across Linux ConfigFS,
  * pre-exposed /dev/hidg* nodes, and legacy android_usb kernels.
  */
 object UsbGadgetManager {
@@ -34,74 +36,6 @@ object UsbGadgetManager {
     private var activeGadgetName: String? = null
     private var activeConfigDirName: String? = null
     private var previousUsbConfig: String? = null
-
-    // Standard USB HID Keyboard Report Descriptor (63 bytes, 8-byte report)
-    private val KEYBOARD_REPORT_DESCRIPTOR = byteArrayOf(
-        0x05, 0x01,                      // Usage Page (Generic Desktop)
-        0x09, 0x06,                      // Usage (Keyboard)
-        0xA1.toByte(), 0x01,             // Collection (Application)
-        0x05, 0x07,                      //   Usage Page (Key Codes)
-        0x19, 0xE0.toByte(),             //   Usage Minimum (224) - Left Control
-        0x29, 0xE7.toByte(),             //   Usage Maximum (231) - Right GUI
-        0x15, 0x00,                      //   Logical Minimum (0)
-        0x25, 0x01,                      //   Logical Maximum (1)
-        0x75, 0x01,                      //   Report Size (1)
-        0x95.toByte(), 0x08,             //   Report Count (8)
-        0x81.toByte(), 0x02,             //   Input (Data, Variable, Absolute) - Modifier byte
-        0x95.toByte(), 0x01,             //   Report Count (1)
-        0x75, 0x08,                      //   Report Size (8)
-        0x81.toByte(), 0x01,             //   Input (Constant) - Reserved byte
-        0x95.toByte(), 0x05,             //   Report Count (5)
-        0x75, 0x01,                      //   Report Size (1)
-        0x05, 0x08,                      //   Usage Page (LEDs)
-        0x19, 0x01,                      //   Usage Minimum (1) - Num Lock
-        0x29, 0x05,                      //   Usage Maximum (5) - Kana
-        0x91.toByte(), 0x02,             //   Output (Data, Variable, Absolute) - LED report
-        0x95.toByte(), 0x01,             //   Report Count (1)
-        0x75, 0x03,                      //   Report Size (3)
-        0x91.toByte(), 0x01,             //   Output (Constant) - LED padding
-        0x95.toByte(), 0x06,             //   Report Count (6)
-        0x75, 0x08,                      //   Report Size (8)
-        0x15, 0x00,                      //   Logical Minimum (0)
-        0x25, 0x65,                      //   Logical Maximum (101)
-        0x05, 0x07,                      //   Usage Page (Key Codes)
-        0x19, 0x00,                      //   Usage Minimum (0)
-        0x29, 0x65,                      //   Usage Maximum (101)
-        0x81.toByte(), 0x00,             //   Input (Data, Array) - Key array (6 keys)
-        0xC0.toByte()                    // End Collection
-    )
-
-    // Standard USB HID 3-Button Mouse + Wheel Report Descriptor (52 bytes, 4-byte report)
-    // [0] Buttons (bit 0=Left, bit 1=Right, bit 2=Middle), [1] dX, [2] dY, [3] Wheel
-    private val MOUSE_REPORT_DESCRIPTOR = byteArrayOf(
-        0x05, 0x01,                      // Usage Page (Generic Desktop)
-        0x09, 0x02,                      // Usage (Mouse)
-        0xA1.toByte(), 0x01,             // Collection (Application)
-        0x09, 0x01,                      //   Usage (Pointer)
-        0xA1.toByte(), 0x00,             //   Collection (Physical)
-        0x05, 0x09,                      //     Usage Page (Buttons)
-        0x19, 0x01,                      //     Usage Minimum (1)
-        0x29, 0x03,                      //     Usage Maximum (3)
-        0x15, 0x00,                      //     Logical Minimum (0)
-        0x25, 0x01,                      //     Logical Maximum (1)
-        0x95.toByte(), 0x03,             //     Report Count (3)
-        0x75, 0x01,                      //     Report Size (1)
-        0x81.toByte(), 0x02,             //     Input (Data, Variable, Absolute)
-        0x95.toByte(), 0x01,             //     Report Count (1)
-        0x75, 0x05,                      //     Report Size (5)
-        0x81.toByte(), 0x01,             //     Input (Constant) - 5-bit padding
-        0x05, 0x01,                      //     Usage Page (Generic Desktop)
-        0x09, 0x30,                      //     Usage (X)
-        0x09, 0x31,                      //     Usage (Y)
-        0x09, 0x38,                      //     Usage (Wheel)
-        0x15, 0x81.toByte(),             //     Logical Minimum (-127)
-        0x25, 0x7F,                      //     Logical Maximum (127)
-        0x75, 0x08,                      //     Report Size (8)
-        0x95.toByte(), 0x03,             //     Report Count (3)
-        0x81.toByte(), 0x06,             //     Input (Data, Variable, Relative)
-        0xC0.toByte(),                   //   End Collection (Physical)
-        0xC0.toByte()                    // End Collection (Application)
-    )
 
     suspend fun detectEnvironment(): GadgetEnvironment {
         val probeScript = """
@@ -120,6 +54,7 @@ object UsbGadgetManager {
             fi
             HIDG0=$(ls /dev/hidg* 2>/dev/null | sed -n '1p')
             HIDG1=$(ls /dev/hidg* 2>/dev/null | sed -n '2p')
+            HIDG2=$(ls /dev/hidg* 2>/dev/null | sed -n '3p')
             UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
             AUSB="no"
             [ -d /sys/class/android_usb/android0 ] && AUSB="yes"
@@ -130,6 +65,7 @@ object UsbGadgetManager {
             echo "CFG=${'$'}CFG"
             echo "HIDG0=${'$'}HIDG0"
             echo "HIDG1=${'$'}HIDG1"
+            echo "HIDG2=${'$'}HIDG2"
             echo "UDC=${'$'}UDC"
             echo "AUSB=${'$'}AUSB"
             echo "GFS=${'$'}GFS"
@@ -150,6 +86,7 @@ object UsbGadgetManager {
         val cfg = map["CFG"]?.takeIf { it.isNotBlank() }
         val hidg0 = map["HIDG0"]?.takeIf { it.isNotBlank() }
         val hidg1 = map["HIDG1"]?.takeIf { it.isNotBlank() }
+        val hidg2 = map["HIDG2"]?.takeIf { it.isNotBlank() }
         val udc = map["UDC"]?.takeIf { it.isNotBlank() }
         val ausb = map["AUSB"] == "yes"
         val gfs = map["GFS"] == "yes"
@@ -166,6 +103,7 @@ object UsbGadgetManager {
             configFsPath = cfg,
             hidDevicePath = hidg0,
             mouseDevicePath = hidg1,
+            gamepadDevicePath = hidg2,
             udcName = udc,
             hasGadgetFs = gfs
         )
@@ -191,9 +129,11 @@ object UsbGadgetManager {
             GadgetBackend.EXISTING_HIDG -> {
                 val kbd = env.hidDevicePath!!
                 val mouse = env.mouseDevicePath
+                val gamepad = env.gamepadDevicePath
                 RootShell.execute("chmod 666 \"$kbd\" 2>/dev/null || true")
                 if (mouse != null) RootShell.execute("chmod 666 \"$mouse\" 2>/dev/null || true")
-                Result.success(EnabledHidDevices(kbd, mouse))
+                if (gamepad != null) RootShell.execute("chmod 666 \"$gamepad\" 2>/dev/null || true")
+                Result.success(EnabledHidDevices(kbd, mouse, gamepad))
             }
             GadgetBackend.NONE -> Result.failure(Exception("Unsupported USB gadget backend"))
         }
@@ -225,8 +165,9 @@ object UsbGadgetManager {
         isExistingG1: Boolean
     ): Result<EnabledHidDevices> {
         val gadgetDir = "$configFsBase/$gadgetName"
-        val kbdHex = KEYBOARD_REPORT_DESCRIPTOR.joinToString("") { "\\x%02x".format(it) }
-        val mouseHex = MOUSE_REPORT_DESCRIPTOR.joinToString("") { "\\x%02x".format(it) }
+        val kbdHex = HidDescriptors.USB_KEYBOARD_REPORT_DESCRIPTOR.joinToString("") { "\\x%02x".format(it) }
+        val mouseHex = HidDescriptors.USB_MOUSE_REPORT_DESCRIPTOR.joinToString("") { "\\x%02x".format(it) }
+        val gamepadHex = HidDescriptors.USB_GAMEPAD_REPORT_DESCRIPTOR.joinToString("") { "\\x%02x".format(it) }
 
         val configSubDir = if (isExistingG1) {
             val detected = RootShell.execute(
@@ -261,7 +202,11 @@ object UsbGadgetManager {
                 )
             )
         } else {
-            commands.add("rm -f $gadgetDir/configs/$configSubDir/hid.usb0 $gadgetDir/configs/$configSubDir/hid.usb1 2>/dev/null || true")
+            commands.add(
+                "rm -f $gadgetDir/configs/$configSubDir/hid.usb0 " +
+                    "$gadgetDir/configs/$configSubDir/hid.usb1 " +
+                    "$gadgetDir/configs/$configSubDir/hid.usb2 2>/dev/null || true"
+            )
         }
 
         commands.addAll(
@@ -281,13 +226,22 @@ object UsbGadgetManager {
                 // Link Keyboard function
                 "ln -s $gadgetDir/functions/hid.usb0 $gadgetDir/configs/$configSubDir/hid.usb0",
 
-                // 2. Mouse HID function (hid.usb1) - best effort so keyboard still works if kernel limits to 1 hid
+                // 2. Mouse HID function (hid.usb1) - best effort
                 "if mkdir -p $gadgetDir/functions/hid.usb1 2>/dev/null; then " +
                     "echo 2 > $gadgetDir/functions/hid.usb1/protocol; " +
                     "echo 1 > $gadgetDir/functions/hid.usb1/subclass; " +
                     "echo 4 > $gadgetDir/functions/hid.usb1/report_length; " +
                     "printf '${mouseHex}' > $gadgetDir/functions/hid.usb1/report_desc; " +
                     "ln -s $gadgetDir/functions/hid.usb1 $gadgetDir/configs/$configSubDir/hid.usb1 2>/dev/null || true; " +
+                "fi",
+
+                // 3. Gamepad HID function (hid.usb2) - best effort
+                "if mkdir -p $gadgetDir/functions/hid.usb2 2>/dev/null; then " +
+                    "echo 0 > $gadgetDir/functions/hid.usb2/protocol; " +
+                    "echo 0 > $gadgetDir/functions/hid.usb2/subclass; " +
+                    "echo 9 > $gadgetDir/functions/hid.usb2/report_length; " +
+                    "printf '${gamepadHex}' > $gadgetDir/functions/hid.usb2/report_desc; " +
+                    "ln -s $gadgetDir/functions/hid.usb2 $gadgetDir/configs/$configSubDir/hid.usb2 2>/dev/null || true; " +
                 "fi",
 
                 // Bind to UDC
@@ -298,11 +252,14 @@ object UsbGadgetManager {
                 "sleep 0.4",
                 "HIDG0=\$(ls /dev/hidg* 2>/dev/null | sed -n '1p')",
                 "HIDG1=\$(ls /dev/hidg* 2>/dev/null | sed -n '2p')",
+                "HIDG2=\$(ls /dev/hidg* 2>/dev/null | sed -n '3p')",
                 "if [ -z \"\$HIDG0\" ]; then echo 'NO_HIDG_NODE' >&2; exit 1; fi",
                 "chmod 666 \"\$HIDG0\" 2>/dev/null || true",
                 "[ -n \"\$HIDG1\" ] && chmod 666 \"\$HIDG1\" 2>/dev/null || true",
+                "[ -n \"\$HIDG2\" ] && chmod 666 \"\$HIDG2\" 2>/dev/null || true",
                 "echo \"KBD=\$HIDG0\"",
-                "echo \"MOUSE=\$HIDG1\""
+                "echo \"MOUSE=\$HIDG1\"",
+                "echo \"GAMEPAD=\$HIDG2\""
             )
         )
 
@@ -313,10 +270,12 @@ object UsbGadgetManager {
                 ?: throw Exception("HID device node (/dev/hidg*) was not created by the kernel.")
             val mouse = output.lines().firstOrNull { it.startsWith("MOUSE=") }
                 ?.substringAfter("MOUSE=")?.trim()?.takeIf { it.isNotBlank() }
+            val gamepad = output.lines().firstOrNull { it.startsWith("GAMEPAD=") }
+                ?.substringAfter("GAMEPAD=")?.trim()?.takeIf { it.isNotBlank() }
             activeConfigFsPath = configFsBase
             activeGadgetName = gadgetName
             activeConfigDirName = configSubDir
-            EnabledHidDevices(keyboardPath = kbd, mousePath = mouse)
+            EnabledHidDevices(keyboardPath = kbd, mousePath = mouse, gamepadPath = gamepad)
         }
     }
 
@@ -329,11 +288,14 @@ object UsbGadgetManager {
             "sleep 0.4",
             "HIDG0=\$(ls /dev/hidg* 2>/dev/null | sed -n '1p')",
             "HIDG1=\$(ls /dev/hidg* 2>/dev/null | sed -n '2p')",
+            "HIDG2=\$(ls /dev/hidg* 2>/dev/null | sed -n '3p')",
             "if [ -z \"\$HIDG0\" ]; then echo 'NO_HIDG_NODE' >&2; exit 1; fi",
             "chmod 666 \"\$HIDG0\" 2>/dev/null || true",
             "[ -n \"\$HIDG1\" ] && chmod 666 \"\$HIDG1\" 2>/dev/null || true",
+            "[ -n \"\$HIDG2\" ] && chmod 666 \"\$HIDG2\" 2>/dev/null || true",
             "echo \"KBD=\$HIDG0\"",
-            "echo \"MOUSE=\$HIDG1\""
+            "echo \"MOUSE=\$HIDG1\"",
+            "echo \"GAMEPAD=\$HIDG2\""
         )
 
         val result = RootShell.executeBatch(commands)
@@ -343,7 +305,9 @@ object UsbGadgetManager {
                 ?: throw Exception("Legacy android_usb did not expose /dev/hidg*.")
             val mouse = output.lines().firstOrNull { it.startsWith("MOUSE=") }
                 ?.substringAfter("MOUSE=")?.trim()?.takeIf { it.isNotBlank() }
-            EnabledHidDevices(keyboardPath = kbd, mousePath = mouse)
+            val gamepad = output.lines().firstOrNull { it.startsWith("GAMEPAD=") }
+                ?.substringAfter("GAMEPAD=")?.trim()?.takeIf { it.isNotBlank() }
+            EnabledHidDevices(keyboardPath = kbd, mousePath = mouse, gamepadPath = gamepad)
         }
     }
 
@@ -356,7 +320,11 @@ object UsbGadgetManager {
         if (base != null && name != null) {
             val gadgetDir = "$base/$name"
             commands.add("echo '' > $gadgetDir/UDC 2>/dev/null || true")
-            commands.add("rm -f $gadgetDir/configs/$cfgName/hid.usb0 $gadgetDir/configs/$cfgName/hid.usb1 2>/dev/null || true")
+            commands.add(
+                "rm -f $gadgetDir/configs/$cfgName/hid.usb0 " +
+                    "$gadgetDir/configs/$cfgName/hid.usb1 " +
+                    "$gadgetDir/configs/$cfgName/hid.usb2 2>/dev/null || true"
+            )
             if (name != "g1") {
                 commands.addAll(
                     listOf(
@@ -364,6 +332,7 @@ object UsbGadgetManager {
                         "rmdir $gadgetDir/configs/$cfgName 2>/dev/null || true",
                         "rmdir $gadgetDir/functions/hid.usb0 2>/dev/null || true",
                         "rmdir $gadgetDir/functions/hid.usb1 2>/dev/null || true",
+                        "rmdir $gadgetDir/functions/hid.usb2 2>/dev/null || true",
                         "rmdir $gadgetDir/strings/0x409 2>/dev/null || true",
                         "rmdir $gadgetDir 2>/dev/null || true"
                     )
@@ -371,6 +340,7 @@ object UsbGadgetManager {
             } else {
                 commands.add("rmdir $gadgetDir/functions/hid.usb0 2>/dev/null || true")
                 commands.add("rmdir $gadgetDir/functions/hid.usb1 2>/dev/null || true")
+                commands.add("rmdir $gadgetDir/functions/hid.usb2 2>/dev/null || true")
             }
         }
 
@@ -389,11 +359,12 @@ object UsbGadgetManager {
     private suspend fun disableQuiet(gadgetDir: String, cfgName: String) {
         val commands = listOf(
             "echo '' > $gadgetDir/UDC 2>/dev/null || true",
-            "rm -f $gadgetDir/configs/$cfgName/hid.usb0 $gadgetDir/configs/$cfgName/hid.usb1 2>/dev/null || true",
+            "rm -f $gadgetDir/configs/$cfgName/hid.usb0 $gadgetDir/configs/$cfgName/hid.usb1 $gadgetDir/configs/$cfgName/hid.usb2 2>/dev/null || true",
             "rmdir $gadgetDir/configs/$cfgName/strings/0x409 2>/dev/null || true",
             "rmdir $gadgetDir/configs/$cfgName 2>/dev/null || true",
             "rmdir $gadgetDir/functions/hid.usb0 2>/dev/null || true",
             "rmdir $gadgetDir/functions/hid.usb1 2>/dev/null || true",
+            "rmdir $gadgetDir/functions/hid.usb2 2>/dev/null || true",
             "rmdir $gadgetDir/strings/0x409 2>/dev/null || true",
             "rmdir $gadgetDir 2>/dev/null || true"
         )

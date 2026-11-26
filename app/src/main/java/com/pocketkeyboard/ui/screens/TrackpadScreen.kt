@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,11 +34,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.pocketkeyboard.hid.HidReportSender
+import com.pocketkeyboard.viewmodel.TransportMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /**
  * Full-screen Trackpad page.
@@ -46,6 +50,8 @@ import kotlin.math.abs
 fun TrackpadScreen(
     hidArmed: Boolean,
     mouseAvailable: Boolean,
+    transportMode: TransportMode,
+    sensitivity: Float = 1.25f,
     onMouseMove: (dx: Int, dy: Int) -> Unit,
     onMouseScroll: (wheel: Int) -> Unit,
     onMouseButtonDown: (Int) -> Unit,
@@ -67,10 +73,13 @@ fun TrackpadScreen(
                 )
             ) {
                 Text(
-                    text = if (!hidArmed) {
-                        "USB HID is DISARMED. Arm it in the USB HID tab to use the trackpad."
-                    } else {
-                        "Mouse HID interface (/dev/hidg1) was not exposed by this kernel."
+                    text = when {
+                        !hidArmed && transportMode == TransportMode.BLUETOOTH ->
+                            "Bluetooth HID is not connected. Connect to a host in the Connect tab to use the trackpad."
+                        !hidArmed ->
+                            "USB HID is DISARMED. Arm it in the Connect tab to use the trackpad."
+                        else ->
+                            "Mouse HID interface (/dev/hidg1) was not exposed by this kernel."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
@@ -82,6 +91,7 @@ fun TrackpadScreen(
         TrackpadPanel(
             enabled = hidArmed && mouseAvailable,
             buttonHeight = 56.dp,
+            sensitivity = sensitivity,
             onMouseMove = onMouseMove,
             onMouseScroll = onMouseScroll,
             onMouseButtonDown = onMouseButtonDown,
@@ -99,6 +109,7 @@ fun TrackpadScreen(
 fun TrackpadPanel(
     enabled: Boolean,
     buttonHeight: Dp = 48.dp,
+    sensitivity: Float = 1.25f,
     onMouseMove: (dx: Int, dy: Int) -> Unit,
     onMouseScroll: (wheel: Int) -> Unit,
     onMouseButtonDown: (Int) -> Unit,
@@ -107,6 +118,7 @@ fun TrackpadPanel(
     modifier: Modifier = Modifier
 ) {
     val haptic = LocalHapticFeedback.current
+    val currentSensitivity by rememberUpdatedState(sensitivity)
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -127,7 +139,6 @@ fun TrackpadPanel(
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
 
-                    val sensitivity = 1.4f
                     val scrollSensitivity = 0.08f
                     val doubleTapWindowMs = 200L
 
@@ -144,6 +155,7 @@ fun TrackpadPanel(
                             var maxPointers = 0
                             var totalTravel = 0f
                             var isTapDragging = false
+                            var hadMultiTouch = false
 
                             while (true) {
                                 val event = awaitPointerEvent()
@@ -156,6 +168,7 @@ fun TrackpadPanel(
                                     remX = 0f
                                     remY = 0f
                                     remWheel = 0f
+                                    hadMultiTouch = false
 
                                     // Double-tap & hold: cancel the first tap's click and send only Left Press until release
                                     if (pressed.size == 1 && (now - lastTapUpTime) <= doubleTapWindowMs) {
@@ -172,36 +185,44 @@ fun TrackpadPanel(
                                     maxPointers = pressed.size
                                 }
 
-                                if (pressed.size == 1) {
-                                    val change = pressed[0]
-                                    val delta = change.positionChange()
-                                    if (delta.x != 0f || delta.y != 0f) {
-                                        totalTravel += abs(delta.x) + abs(delta.y)
-                                        remX += delta.x * sensitivity
-                                        remY += delta.y * sensitivity
-
-                                        val dx = remX.toInt()
-                                        val dy = remY.toInt()
-                                        remX -= dx
-                                        remY -= dy
-
-                                        if (dx != 0 || dy != 0) {
-                                            onMouseMove(dx, dy)
-                                        }
-                                        change.consume()
-                                    }
-                                } else if (pressed.size >= 2) {
+                                if (pressed.size >= 2) {
+                                    hadMultiTouch = true
                                     val avgDeltaY = pressed.map { it.positionChange().y }.average().toFloat()
                                     val avgDeltaX = pressed.map { it.positionChange().x }.average().toFloat()
                                     totalTravel += abs(avgDeltaX) + abs(avgDeltaY)
 
                                     remWheel += -avgDeltaY * scrollSensitivity
-                                    val wheelInt = remWheel.toInt()
+                                    val wheelInt = remWheel.roundToInt()
                                     remWheel -= wheelInt
                                     if (wheelInt != 0) {
                                         onMouseScroll(wheelInt)
                                     }
                                     pressed.forEach { it.consume() }
+                                } else if (pressed.size == 1) {
+                                    val change = pressed[0]
+                                    if (!hadMultiTouch && change.previousPressed) {
+                                        val delta = change.positionChange()
+                                        if (delta.x != 0f || delta.y != 0f) {
+                                            totalTravel += abs(delta.x) + abs(delta.y)
+                                            val speed = hypot(delta.x, delta.y)
+                                            val accel = (0.85f + (speed * 0.045f)).coerceIn(0.85f, 1.85f)
+                                            val gain = currentSensitivity * accel
+                                            remX += delta.x * gain
+                                            remY += delta.y * gain
+
+                                            val dx = remX.roundToInt()
+                                            val dy = remY.roundToInt()
+                                            remX -= dx
+                                            remY -= dy
+
+                                            if (dx != 0 || dy != 0) {
+                                                onMouseMove(dx, dy)
+                                            }
+                                            change.consume()
+                                        }
+                                    } else {
+                                        change.consume()
+                                    }
                                 }
 
                                 if (pressed.isEmpty() && maxPointers > 0) {
@@ -229,6 +250,7 @@ fun TrackpadPanel(
                                         }
                                     }
                                     maxPointers = 0
+                                    hadMultiTouch = false
                                 }
                             }
                         }

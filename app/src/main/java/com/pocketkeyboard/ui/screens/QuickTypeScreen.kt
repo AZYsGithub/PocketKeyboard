@@ -20,15 +20,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.pocketkeyboard.hid.HidKeyMap
+import com.pocketkeyboard.viewmodel.TransportMode
 
 /**
  * Quick Type page using the device's system virtual keyboard (e.g. Gboard)
- * to stream keystrokes over USB HID in real time.
+ * to stream keystrokes over HID in real time.
  */
 @Composable
 fun QuickTypeScreen(
     text: String,
     hidArmed: Boolean,
+    transportMode: TransportMode,
     onTextChanged: (String) -> Unit,
     onSendQuickKey: (modifiers: Int, keyCode: Int) -> Unit,
     onClearBox: () -> Unit,
@@ -48,7 +50,11 @@ fun QuickTypeScreen(
                 )
             ) {
                 Text(
-                    text = "USB HID is currently DISARMED. Arm it in the USB HID tab to send keystrokes.",
+                    text = if (transportMode == TransportMode.BLUETOOTH) {
+                        "Bluetooth HID is not connected. Connect to a host in the Connect tab to send keystrokes."
+                    } else {
+                        "USB HID is currently DISARMED. Arm it in the Connect tab to send keystrokes."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
                     modifier = Modifier.padding(12.dp)
