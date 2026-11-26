@@ -22,8 +22,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -49,6 +53,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -65,6 +70,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 private val ShellBg = Color(0xFF14171F)
@@ -99,6 +105,8 @@ fun ControllerScreen(
     transportMode: TransportMode,
     bluetoothBridgeHost: String? = null,
     controllerStyle: ControllerStyle,
+    isFullscreen: Boolean = false,
+    onToggleFullscreen: () -> Unit = {},
     onToggleControllerStyle: (ControllerStyle) -> Unit,
     onButtonChange: (Int, Boolean) -> Unit,
     onDpadChange: (Int) -> Unit,
@@ -137,10 +145,12 @@ fun ControllerScreen(
                     text = when {
                         transportMode == TransportMode.BLUETOOTH && bluetoothBridgeHost == null ->
                             "Not connected. Connect in the Connect tab, or run PocketPadXboxBridge.exe on your Windows PC over Bluetooth."
+                        !hidArmed && transportMode == TransportMode.USB_BRIDGE ->
+                            "USB Bridge is waiting for PC. Plug in USB cable (USB Tethering or USB Debugging) and run PocketPadXboxBridge.exe."
                         !hidArmed && transportMode == TransportMode.USB_ROOT ->
                             "USB HID is DISARMED. Arm it in the Connect tab to use the Gamepad."
                         else ->
-                            "Gamepad HID interface (/dev/hidg2) was not exposed by this kernel. Use Bluetooth mode for Gamepad."
+                            "Gamepad HID interface (/dev/hidg2) was not exposed by this kernel. Use Bluetooth or USB Bridge mode."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
@@ -161,6 +171,8 @@ fun ControllerScreen(
                     enabled = enabled,
                     controllerStyle = controllerStyle,
                     accentColor = accentColor,
+                    isFullscreen = isFullscreen,
+                    onToggleFullscreen = onToggleFullscreen,
                     onToggleControllerStyle = onToggleControllerStyle,
                     onButtonChange = onButtonChange,
                     onDpadChange = onDpadChange,
@@ -175,6 +187,8 @@ fun ControllerScreen(
                     enabled = enabled,
                     controllerStyle = controllerStyle,
                     accentColor = accentColor,
+                    isFullscreen = isFullscreen,
+                    onToggleFullscreen = onToggleFullscreen,
                     onToggleControllerStyle = onToggleControllerStyle,
                     onButtonChange = onButtonChange,
                     onDpadChange = onDpadChange,
@@ -188,12 +202,69 @@ fun ControllerScreen(
 }
 
 @Composable
+private fun LeftStickCluster(
+    stickSize: Dp,
+    label: String,
+    stickClickLabel: String,
+    enabled: Boolean,
+    accentColor: Color,
+    onStickMove: (Int, Int) -> Unit,
+    onStickClickChange: (Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxHeight(),
+        verticalArrangement = Arrangement.Bottom,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        GamepadThumbstick(
+            label = label,
+            size = stickSize,
+            enabled = enabled,
+            accentColor = accentColor,
+            onStickMove = onStickMove
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        GamepadShoulderButton(
+            label = stickClickLabel,
+            enabled = enabled,
+            accentColor = accentColor,
+            onPressedChange = onStickClickChange,
+            modifier = Modifier
+                .width(58.dp)
+                .height(26.dp)
+        )
+    }
+}
+
+@Composable
+private fun DpadCluster(
+    dpadSize: Dp,
+    enabled: Boolean,
+    accentColor: Color,
+    onDpadChange: (Int) -> Unit
+) {
+    Box(
+        modifier = Modifier.fillMaxHeight(),
+        contentAlignment = Alignment.Center
+    ) {
+        GamepadDpad(
+            size = dpadSize,
+            enabled = enabled,
+            accentColor = accentColor,
+            onDpadChange = onDpadChange
+        )
+    }
+}
+
+@Composable
 private fun LandscapeGamepadLayout(
     maxWidth: Dp,
     maxHeight: Dp,
     enabled: Boolean,
     controllerStyle: ControllerStyle,
     accentColor: Color,
+    isFullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
     onToggleControllerStyle: (ControllerStyle) -> Unit,
     onButtonChange: (Int, Boolean) -> Unit,
     onDpadChange: (Int) -> Unit,
@@ -202,10 +273,10 @@ private fun LandscapeGamepadLayout(
     onTriggerChange: (Boolean, Int) -> Unit
 ) {
     val isXbox = controllerStyle == ControllerStyle.XBOX
-    val topRowHeight = (maxHeight * 0.24f).coerceIn(50.dp, 82.dp)
-    val dpadSize = minOf(maxHeight * 0.44f, maxWidth * 0.17f).coerceIn(88.dp, 138.dp)
-    val faceSize = minOf(maxHeight * 0.46f, maxWidth * 0.18f).coerceIn(92.dp, 144.dp)
-    val stickSize = minOf(maxHeight * 0.42f, maxWidth * 0.16f).coerceIn(84.dp, 130.dp)
+    val topRowHeight = (maxHeight * 0.21f).coerceIn(46.dp, 74.dp)
+    val dpadSize = minOf(maxHeight * 0.44f, maxWidth * 0.17f).coerceIn(88.dp, 134.dp)
+    val faceSize = minOf(maxHeight * 0.50f, maxWidth * 0.20f).coerceIn(100.dp, 150.dp)
+    val stickSize = minOf(maxHeight * 0.56f, maxWidth * 0.22f).coerceIn(104.dp, 158.dp)
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -297,7 +368,7 @@ private fun LandscapeGamepadLayout(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left cluster: D-Pad + Left Stick / L3 (LS)
+            // Left cluster: Xbox places Left Stick outer-left; PS5 places D-Pad outer-left
             Row(
                 modifier = Modifier
                     .weight(1f)
@@ -305,45 +376,42 @@ private fun LandscapeGamepadLayout(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier.fillMaxHeight(),
-                    contentAlignment = Alignment.TopCenter
-                ) {
-                    GamepadDpad(
-                        size = dpadSize,
-                        enabled = enabled,
-                        accentColor = accentColor,
-                        onDpadChange = onDpadChange,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
-
-                Column(
-                    modifier = Modifier.fillMaxHeight(),
-                    verticalArrangement = Arrangement.Bottom,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    GamepadThumbstick(
+                if (isXbox) {
+                    LeftStickCluster(
+                        stickSize = stickSize,
                         label = "L",
-                        size = stickSize,
+                        stickClickLabel = "LS",
                         enabled = enabled,
                         accentColor = accentColor,
-                        onStickMove = onLeftStickChange
+                        onStickMove = onLeftStickChange,
+                        onStickClickChange = { onButtonChange(HidGamepadMap.BTN_L3, it) }
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    GamepadShoulderButton(
-                        label = if (isXbox) "LS" else "L3",
+                    DpadCluster(
+                        dpadSize = dpadSize,
                         enabled = enabled,
                         accentColor = accentColor,
-                        onPressedChange = { onButtonChange(HidGamepadMap.BTN_L3, it) },
-                        modifier = Modifier
-                            .width(58.dp)
-                            .height(26.dp)
+                        onDpadChange = onDpadChange
+                    )
+                } else {
+                    DpadCluster(
+                        dpadSize = dpadSize,
+                        enabled = enabled,
+                        accentColor = accentColor,
+                        onDpadChange = onDpadChange
+                    )
+                    LeftStickCluster(
+                        stickSize = stickSize,
+                        label = "L",
+                        stickClickLabel = "L3",
+                        enabled = enabled,
+                        accentColor = accentColor,
+                        onStickMove = onLeftStickChange,
+                        onStickClickChange = { onButtonChange(HidGamepadMap.BTN_L3, it) }
                     )
                 }
             }
 
-            // Center Home + Mute + Layout toggle column
+            // Center Home + Mute + Layout + Fullscreen toggle column
             Column(
                 modifier = Modifier
                     .padding(horizontal = 6.dp)
@@ -353,12 +421,12 @@ private fun LandscapeGamepadLayout(
             ) {
                 GamepadHomeButton(
                     label = if (isXbox) "XBOX" else "PS",
-                    size = 46.dp,
+                    size = 44.dp,
                     enabled = enabled,
                     accentColor = accentColor,
                     onPressedChange = { onButtonChange(HidGamepadMap.BTN_PS, it) }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 GamepadShoulderButton(
                     label = "MUTE",
                     enabled = enabled,
@@ -368,11 +436,17 @@ private fun LandscapeGamepadLayout(
                         .width(56.dp)
                         .height(24.dp)
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 ControllerStyleSwitchPill(
                     controllerStyle = controllerStyle,
                     accentColor = accentColor,
                     onToggle = onToggleControllerStyle
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                FullscreenTogglePill(
+                    isFullscreen = isFullscreen,
+                    accentColor = accentColor,
+                    onToggle = onToggleFullscreen
                 )
             }
 
@@ -384,40 +458,25 @@ private fun LandscapeGamepadLayout(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(
-                    modifier = Modifier.fillMaxHeight(),
-                    verticalArrangement = Arrangement.Bottom,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    GamepadThumbstick(
-                        label = "R",
-                        size = stickSize,
-                        enabled = enabled,
-                        accentColor = accentColor,
-                        onStickMove = onRightStickChange
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    GamepadShoulderButton(
-                        label = if (isXbox) "RS" else "R3",
-                        enabled = enabled,
-                        accentColor = accentColor,
-                        onPressedChange = { onButtonChange(HidGamepadMap.BTN_R3, it) },
-                        modifier = Modifier
-                            .width(58.dp)
-                            .height(26.dp)
-                    )
-                }
+                LeftStickCluster(
+                    stickSize = stickSize,
+                    label = "R",
+                    stickClickLabel = if (isXbox) "RS" else "R3",
+                    enabled = enabled,
+                    accentColor = accentColor,
+                    onStickMove = onRightStickChange,
+                    onStickClickChange = { onButtonChange(HidGamepadMap.BTN_R3, it) }
+                )
 
                 Box(
                     modifier = Modifier.fillMaxHeight(),
-                    contentAlignment = Alignment.TopCenter
+                    contentAlignment = Alignment.Center
                 ) {
                     GamepadFaceButtons(
                         size = faceSize,
                         enabled = enabled,
                         isXbox = isXbox,
-                        onButtonChange = onButtonChange,
-                        modifier = Modifier.padding(top = 6.dp)
+                        onButtonChange = onButtonChange
                     )
                 }
             }
@@ -432,6 +491,8 @@ private fun PortraitGamepadLayout(
     enabled: Boolean,
     controllerStyle: ControllerStyle,
     accentColor: Color,
+    isFullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
     onToggleControllerStyle: (ControllerStyle) -> Unit,
     onButtonChange: (Int, Boolean) -> Unit,
     onDpadChange: (Int) -> Unit,
@@ -441,8 +502,8 @@ private fun PortraitGamepadLayout(
 ) {
     val isXbox = controllerStyle == ControllerStyle.XBOX
     val dpadSize = minOf(maxWidth * 0.34f, maxHeight * 0.28f).coerceIn(96.dp, 136.dp)
-    val faceSize = minOf(maxWidth * 0.35f, maxHeight * 0.29f).coerceIn(100.dp, 142.dp)
-    val stickSize = minOf(maxWidth * 0.34f, maxHeight * 0.28f).coerceIn(96.dp, 134.dp)
+    val faceSize = minOf(maxWidth * 0.36f, maxHeight * 0.30f).coerceIn(104.dp, 146.dp)
+    val stickSize = minOf(maxWidth * 0.38f, maxHeight * 0.32f).coerceIn(108.dp, 150.dp)
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -597,6 +658,11 @@ private fun PortraitGamepadLayout(
                     accentColor = accentColor,
                     onToggle = onToggleControllerStyle
                 )
+                FullscreenTogglePill(
+                    isFullscreen = isFullscreen,
+                    accentColor = accentColor,
+                    onToggle = onToggleFullscreen
+                )
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -650,6 +716,41 @@ private fun ControllerStyleSwitchPill(
 }
 
 @Composable
+private fun FullscreenTogglePill(
+    isFullscreen: Boolean,
+    accentColor: Color,
+    onToggle: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onToggle),
+        shape = RoundedCornerShape(12.dp),
+        color = if (isFullscreen) accentColor.copy(alpha = 0.22f) else ControlSurface,
+        border = BorderStroke(1.dp, if (isFullscreen) accentColor else ControlBorder)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Icon(
+                imageVector = if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                contentDescription = if (isFullscreen) "Show tabs" else "Fullscreen gamepad",
+                tint = if (isFullscreen) accentColor else Color(0xFFD5DCE8),
+                modifier = Modifier.size(13.dp)
+            )
+            Text(
+                text = if (isFullscreen) "TABS" else "FULL",
+                color = if (isFullscreen) accentColor else Color(0xFFD5DCE8),
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
 private fun GamepadAnalogTrigger(
     label: String,
     enabled: Boolean,
@@ -684,40 +785,50 @@ private fun GamepadAnalogTrigger(
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 awaitPointerEventScope {
+                    var activePointerId: PointerId? = null
                     var startY = 0f
                     var sliding = false
 
                     while (true) {
                         val event = awaitPointerEvent()
-                        val pressed = event.changes.filter { it.pressed }
-                        if (pressed.isNotEmpty()) {
-                            val p = pressed[0]
-                            if (!isPressed) {
-                                isPressed = true
-                                startY = p.position.y
+                        var tracked = activePointerId?.let { id ->
+                            event.changes.firstOrNull { it.id == id && it.pressed }
+                        }
+
+                        if (tracked == null) {
+                            if (activePointerId != null) {
+                                activePointerId = null
                                 sliding = false
+                                isPressed = false
+                                if (value != 0) {
+                                    value = 0
+                                    currentOnValueChange(0)
+                                }
+                            }
+                            tracked = event.changes.firstOrNull { it.pressed }
+                            if (tracked != null) {
+                                activePointerId = tracked.id
+                                startY = tracked.position.y
+                                sliding = false
+                                isPressed = true
                                 value = 255
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 currentOnValueChange(255)
-                            } else {
-                                if (!sliding && abs(p.position.y - startY) > 10f) {
-                                    sliding = true
-                                }
-                                if (sliding) {
-                                    val h = size.height.coerceAtLeast(1).toFloat()
-                                    val ratio = (p.position.y / h).coerceIn(0.08f, 1f)
-                                    val nextVal = (ratio * 255f).roundToInt().coerceIn(20, 255)
-                                    if (nextVal != value) {
-                                        value = nextVal
-                                        currentOnValueChange(nextVal)
-                                    }
+                            }
+                        } else {
+                            if (!sliding && abs(tracked.position.y - startY) > 28f) {
+                                sliding = true
+                            }
+                            if (sliding) {
+                                val pullUp = (startY - tracked.position.y).coerceAtLeast(0f)
+                                val rangePx = (size.height.coerceAtLeast(1) * 0.75f).coerceAtLeast(32f)
+                                val ratio = (1f - (pullUp / rangePx)).coerceIn(0.10f, 1f)
+                                val nextVal = (ratio * 255f).roundToInt().coerceIn(25, 255)
+                                if (nextVal != value) {
+                                    value = nextVal
+                                    currentOnValueChange(nextVal)
                                 }
                             }
-                        } else if (isPressed) {
-                            isPressed = false
-                            sliding = false
-                            value = 0
-                            currentOnValueChange(0)
                         }
                         event.changes.forEach { it.consume() }
                     }
@@ -951,13 +1062,25 @@ private fun GamepadDpad(
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 awaitPointerEventScope {
+                    var activePointerId: PointerId? = null
+
                     while (true) {
                         val event = awaitPointerEvent()
-                        val pressed = event.changes.filter { it.pressed }
-                        val nextHat = if (pressed.isEmpty()) {
+                        var tracked = activePointerId?.let { id ->
+                            event.changes.firstOrNull { it.id == id && it.pressed }
+                        }
+                        if (tracked == null) {
+                            activePointerId = null
+                            tracked = event.changes.firstOrNull { it.pressed }
+                            if (tracked != null) {
+                                activePointerId = tracked.id
+                            }
+                        }
+
+                        val nextHat = if (tracked == null) {
                             HidGamepadMap.HAT_NEUTRAL
                         } else {
-                            val pos = pressed[0].position
+                            val pos = tracked.position
                             val cx = this.size.width / 2f
                             val cy = this.size.height / 2f
                             val dx = pos.x - cx
@@ -1068,7 +1191,7 @@ private fun GamepadFaceButtons(
     onButtonChange: (Int, Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val btnSize = size * 0.34f
+    val btnSize = size * 0.37f
 
     Box(modifier = modifier.size(size)) {
         GamepadFaceButton(
@@ -1212,6 +1335,8 @@ private fun GamepadThumbstick(
     modifier: Modifier = Modifier
 ) {
     val currentOnStickMove by rememberUpdatedState(onStickMove)
+    var originOffsetX by remember { mutableFloatStateOf(0f) }
+    var originOffsetY by remember { mutableFloatStateOf(0f) }
     var normX by remember { mutableFloatStateOf(0f) }
     var normY by remember { mutableFloatStateOf(0f) }
     var isActive by remember { mutableStateOf(false) }
@@ -1219,11 +1344,17 @@ private fun GamepadThumbstick(
     DisposableEffect(enabled) {
         if (!enabled && isActive) {
             isActive = false
+            originOffsetX = 0f
+            originOffsetY = 0f
             normX = 0f
             normY = 0f
             currentOnStickMove(HidGamepadMap.AXIS_CENTER, HidGamepadMap.AXIS_CENTER)
         }
-        onDispose { }
+        onDispose {
+            if (isActive) {
+                currentOnStickMove(HidGamepadMap.AXIS_CENTER, HidGamepadMap.AXIS_CENTER)
+            }
+        }
     }
 
     Box(
@@ -1240,39 +1371,97 @@ private fun GamepadThumbstick(
                 if (!enabled) return@pointerInput
                 awaitPointerEventScope {
                     val deadzone = 0.06f
+                    val responseExponent = 1.35f
+                    var activePointerId: PointerId? = null
+                    var originX = 0f
+                    var originY = 0f
+                    var lastSentX = HidGamepadMap.AXIS_CENTER
+                    var lastSentY = HidGamepadMap.AXIS_CENTER
+
                     while (true) {
                         val event = awaitPointerEvent()
-                        val pressed = event.changes.filter { it.pressed }
-                        if (pressed.isNotEmpty()) {
-                            isActive = true
-                            val pos = pressed[0].position
-                            val cx = this.size.width / 2f
-                            val cy = this.size.height / 2f
-                            val maxRadius = (minOf(this.size.width, this.size.height) * 0.36f)
-                                .coerceAtLeast(1f)
+                        var tracked = activePointerId?.let { id ->
+                            event.changes.firstOrNull { it.id == id && it.pressed }
+                        }
 
-                            var dx = (pos.x - cx) / maxRadius
-                            var dy = (pos.y - cy) / maxRadius
-                            val mag = hypot(dx, dy)
-                            if (mag > 1f) {
-                                dx /= mag
-                                dy /= mag
+                        if (tracked == null) {
+                            if (activePointerId != null) {
+                                activePointerId = null
+                                isActive = false
+                                originOffsetX = 0f
+                                originOffsetY = 0f
+                                normX = 0f
+                                normY = 0f
+                                if (lastSentX != HidGamepadMap.AXIS_CENTER ||
+                                    lastSentY != HidGamepadMap.AXIS_CENTER
+                                ) {
+                                    lastSentX = HidGamepadMap.AXIS_CENTER
+                                    lastSentY = HidGamepadMap.AXIS_CENTER
+                                    currentOnStickMove(lastSentX, lastSentY)
+                                }
+                            }
+                            val down = event.changes.firstOrNull { it.pressed }
+                            if (down != null) {
+                                val w = this.size.width.toFloat().coerceAtLeast(1f)
+                                val h = this.size.height.toFloat().coerceAtLeast(1f)
+                                val cx = w / 2f
+                                val cy = h / 2f
+                                val maxOriginShift = minOf(w, h) * 0.22f
+
+                                activePointerId = down.id
+                                originX = down.position.x.coerceIn(cx - maxOriginShift, cx + maxOriginShift)
+                                originY = down.position.y.coerceIn(cy - maxOriginShift, cy + maxOriginShift)
+                                originOffsetX = originX - cx
+                                originOffsetY = originY - cy
+                                isActive = true
+                                normX = 0f
+                                normY = 0f
+                                if (lastSentX != HidGamepadMap.AXIS_CENTER ||
+                                    lastSentY != HidGamepadMap.AXIS_CENTER
+                                ) {
+                                    lastSentX = HidGamepadMap.AXIS_CENTER
+                                    lastSentY = HidGamepadMap.AXIS_CENTER
+                                    currentOnStickMove(lastSentX, lastSentY)
+                                }
+                            }
+                        } else {
+                            val w = this.size.width.toFloat().coerceAtLeast(1f)
+                            val h = this.size.height.toFloat().coerceAtLeast(1f)
+                            val maxRadius = (minOf(w, h) * 0.40f).coerceAtLeast(1f)
+
+                            val rawDx = (tracked.position.x - originX) / maxRadius
+                            val rawDy = (tracked.position.y - originY) / maxRadius
+                            val mag = hypot(rawDx, rawDy)
+
+                            val axisX: Int
+                            val axisY: Int
+                            if (mag <= deadzone) {
+                                normX = 0f
+                                normY = 0f
+                                axisX = HidGamepadMap.AXIS_CENTER
+                                axisY = HidGamepadMap.AXIS_CENTER
+                            } else {
+                                val clampedMag = mag.coerceAtMost(1f)
+                                val ux = rawDx / mag
+                                val uy = rawDy / mag
+                                normX = ux * clampedMag
+                                normY = uy * clampedMag
+
+                                val scaledMag = ((clampedMag - deadzone) / (1f - deadzone)).coerceIn(0f, 1f)
+                                val curvedMag = scaledMag.pow(responseExponent)
+                                val outX = ux * curvedMag
+                                val outY = uy * curvedMag
+                                axisX = ((outX + 1f) * 0.5f * 255f).roundToInt().coerceIn(0, 255)
+                                axisY = ((outY + 1f) * 0.5f * 255f).roundToInt().coerceIn(0, 255)
                             }
 
-                            val outX = if (mag < deadzone) 0f else dx
-                            val outY = if (mag < deadzone) 0f else dy
-                            normX = outX
-                            normY = outY
-
-                            val axisX = ((outX + 1f) * 0.5f * 255f).roundToInt().coerceIn(0, 255)
-                            val axisY = ((outY + 1f) * 0.5f * 255f).roundToInt().coerceIn(0, 255)
-                            currentOnStickMove(axisX, axisY)
-                        } else if (isActive) {
-                            isActive = false
-                            normX = 0f
-                            normY = 0f
-                            currentOnStickMove(HidGamepadMap.AXIS_CENTER, HidGamepadMap.AXIS_CENTER)
+                            if (axisX != lastSentX || axisY != lastSentY) {
+                                lastSentX = axisX
+                                lastSentY = axisY
+                                currentOnStickMove(axisX, axisY)
+                            }
                         }
+
                         event.changes.forEach { it.consume() }
                     }
                 }
@@ -1289,24 +1478,33 @@ private fun GamepadThumbstick(
                     center = Offset(cx, cy),
                     radius = r
                 ),
-                radius = r * 0.9f
+                radius = r * 0.92f
+            )
+            val gx = cx + originOffsetX
+            val gy = cy + originOffsetY
+            val guideRadius = r * 0.62f
+            drawCircle(
+                color = if (isActive) accentColor.copy(alpha = 0.28f) else ControlBorder.copy(alpha = 0.30f),
+                center = Offset(gx, gy),
+                radius = guideRadius,
+                style = Stroke(width = 1.dp.toPx())
             )
             drawLine(
                 color = ControlBorder.copy(alpha = 0.35f),
-                start = Offset(cx - r * 0.55f, cy),
-                end = Offset(cx + r * 0.55f, cy),
+                start = Offset(gx - guideRadius * 0.7f, gy),
+                end = Offset(gx + guideRadius * 0.7f, gy),
                 strokeWidth = 1.dp.toPx()
             )
             drawLine(
                 color = ControlBorder.copy(alpha = 0.35f),
-                start = Offset(cx, cy - r * 0.55f),
-                end = Offset(cx, cy + r * 0.55f),
+                start = Offset(gx, gy - guideRadius * 0.7f),
+                end = Offset(gx, gy + guideRadius * 0.7f),
                 strokeWidth = 1.dp.toPx()
             )
         }
 
-        // Floating thumbstick cap
-        val travelFraction = 0.30f
+        // Floating thumbstick cap anchored to dynamic origin
+        val travelFraction = 0.28f
         BoxWithConstraints(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
@@ -1314,14 +1512,14 @@ private fun GamepadThumbstick(
             val travelPx = with(LocalDensity.current) {
                 (minOf(maxWidth, maxHeight) * travelFraction).toPx()
             }
-            val capSize = minOf(maxWidth, maxHeight) * 0.46f
+            val capSize = minOf(maxWidth, maxHeight) * 0.44f
 
             Box(
                 modifier = Modifier
                     .offset {
                         IntOffset(
-                            x = (normX * travelPx).roundToInt(),
-                            y = (normY * travelPx).roundToInt()
+                            x = (originOffsetX + normX * travelPx).roundToInt(),
+                            y = (originOffsetY + normY * travelPx).roundToInt()
                         )
                     }
                     .size(capSize)

@@ -51,11 +51,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.util.Locale
 import com.pocketkeyboard.hid.BluetoothHidSnapshot
 import com.pocketkeyboard.hid.BluetoothHidState
 import com.pocketkeyboard.hid.GadgetBackend
 import com.pocketkeyboard.hid.GadgetEnvironment
+import com.pocketkeyboard.hid.UsbBridgeServer
+import com.pocketkeyboard.hid.UsbBridgeStatus
 import com.pocketkeyboard.ui.theme.ArmedGreen
 import com.pocketkeyboard.ui.theme.DisarmedRed
 import com.pocketkeyboard.ui.theme.WarningAmber
@@ -72,6 +75,7 @@ fun StatusCard(
     transportMode: TransportMode,
     bluetoothSnapshot: BluetoothHidSnapshot,
     bluetoothBridgeHost: String?,
+    usbBridgeStatus: UsbBridgeStatus,
     rootAvailable: Boolean,
     gadgetEnvironment: GadgetEnvironment?,
     hidArmed: Boolean,
@@ -91,6 +95,9 @@ fun StatusCard(
     onRequestEnableBluetooth: () -> Unit,
     onMakeDiscoverable: () -> Unit,
     onOpenBluetoothSettings: () -> Unit,
+    onToggleUsbBridge: (Boolean) -> Unit,
+    onRefreshUsbBridge: () -> Unit,
+    onOpenTetherSettings: () -> Unit,
     onToggleHid: (Boolean) -> Unit,
     onToggleHoldModifiers: (Boolean) -> Unit,
     onToggleVerticalKeyboardTrackpad: (Boolean) -> Unit,
@@ -127,6 +134,17 @@ fun StatusCard(
                     onRequestEnableBluetooth = onRequestEnableBluetooth,
                     onMakeDiscoverable = onMakeDiscoverable,
                     onOpenBluetoothSettings = onOpenBluetoothSettings
+                )
+            }
+
+            TransportMode.USB_BRIDGE -> {
+                UsbBridgeStatusSection(
+                    status = usbBridgeStatus,
+                    errorMessage = errorMessage,
+                    isLoading = isLoading,
+                    onToggleUsbBridge = onToggleUsbBridge,
+                    onRefreshUsbBridge = onRefreshUsbBridge,
+                    onOpenTetherSettings = onOpenTetherSettings
                 )
             }
 
@@ -334,11 +352,11 @@ private fun TransportModeSelector(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             TransportOptionPill(
                 title = "Bluetooth",
-                subtitle = "No Root • Wireless",
+                subtitle = "Wireless",
                 icon = Icons.Filled.Bluetooth,
                 selected = selectedMode == TransportMode.BLUETOOTH,
                 enabled = enabled,
@@ -346,9 +364,18 @@ private fun TransportModeSelector(
                 modifier = Modifier.weight(1f)
             )
             TransportOptionPill(
-                title = "USB HID",
-                subtitle = "Root • Cable / BIOS",
+                title = "USB Bridge",
+                subtitle = "No Root • Fast",
                 icon = Icons.Filled.Usb,
+                selected = selectedMode == TransportMode.USB_BRIDGE,
+                enabled = enabled,
+                onClick = { onSelectMode(TransportMode.USB_BRIDGE) },
+                modifier = Modifier.weight(1f)
+            )
+            TransportOptionPill(
+                title = "USB Root",
+                subtitle = "BIOS HID",
+                icon = Icons.Filled.Shield,
                 selected = selectedMode == TransportMode.USB_ROOT,
                 enabled = enabled,
                 onClick = { onSelectMode(TransportMode.USB_ROOT) },
@@ -392,34 +419,254 @@ private fun TransportOptionPill(
         color = bgColor,
         border = border
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
+        Column(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(18.dp),
                 tint = contentColor
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Column {
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelMedium,
+                color = contentColor,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = subtitle,
+                fontSize = 10.sp,
+                color = contentColor.copy(alpha = 0.8f),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun UsbBridgeStatusSection(
+    status: UsbBridgeStatus,
+    errorMessage: String?,
+    isLoading: Boolean,
+    onToggleUsbBridge: (Boolean) -> Unit,
+    onRefreshUsbBridge: () -> Unit,
+    onOpenTetherSettings: () -> Unit
+) {
+    val cardColor by animateColorAsState(
+        targetValue = when {
+            status.isConnected -> MaterialTheme.colorScheme.primaryContainer
+            status.isListening -> MaterialTheme.colorScheme.secondaryContainer
+            errorMessage != null -> MaterialTheme.colorScheme.errorContainer
+            else -> MaterialTheme.colorScheme.surfaceVariant
+        },
+        label = "usbBridgeCardColor"
+    )
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = cardColor)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Usb,
+                        contentDescription = null,
+                        modifier = Modifier.size(32.dp),
+                        tint = when {
+                            status.isConnected -> ArmedGreen
+                            status.isListening -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "PocketKeyboard",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                        Text(
+                            text = when {
+                                status.isConnected ->
+                                    "Connected via ${status.transportLabel ?: "USB Bridge"}"
+                                status.isListening ->
+                                    "Ready on port ${UsbBridgeServer.PORT} — run PocketPadXboxBridge.exe"
+                                else -> "USB Bridge Stopped"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = when {
+                            status.isConnected -> "ACTIVE"
+                            status.isListening -> "WAIT"
+                            else -> "OFF"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = when {
+                            status.isConnected -> ArmedGreen
+                            status.isListening -> MaterialTheme.colorScheme.primary
+                            else -> DisarmedRed
+                        }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = status.isListening,
+                        onCheckedChange = onToggleUsbBridge,
+                        enabled = !isLoading,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = ArmedGreen,
+                            checkedTrackColor = ArmedGreen.copy(alpha = 0.5f)
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = ArmedGreen
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "No Root Required",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.SportsEsports,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = if (status.isConnected) ArmedGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "500 Hz Gamepad + Mouse + Keys",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+
+            if (status.isConnected && status.peerAddress != null) {
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = title,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = contentColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = subtitle,
+                    text = "PC Peer: ${status.peerAddress}",
                     style = MaterialTheme.typography.labelSmall,
-                    color = contentColor.copy(alpha = 0.8f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
+            if (errorMessage != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = errorMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Low-Latency Wired Setup",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                OutlinedButton(
+                    onClick = onRefreshUsbBridge,
+                    enabled = !isLoading
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Refresh",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Refresh")
+                }
+            }
+
+            Text(
+                text = "1. USB Tethering (~1 ms raw UDP): Plug in a USB data cable, enable USB Tethering, and run PocketPadXboxBridge.exe on your PC. (Turn off mobile data if your PC uses Wi-Fi.)\n2. USB Debugging / ADB (~2-4 ms TCP): Enable USB Debugging once and run PocketPadXboxBridge.exe — keeps your PC Wi-Fi & ping completely untouched.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onOpenTetherSettings,
+                    modifier = Modifier.weight(1f),
+                    enabled = !isLoading
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Settings,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Tether Settings", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+
+            HorizontalDivider()
+
+            Text(
+                text = if (status.localUsbIps.isEmpty()) {
+                    "USB/LAN IPs (port ${UsbBridgeServer.PORT}): None active yet (ADB USB does not need a phone IP)"
+                } else {
+                    "USB/LAN IPs (port ${UsbBridgeServer.PORT}): ${status.localUsbIps.joinToString(", ")}"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

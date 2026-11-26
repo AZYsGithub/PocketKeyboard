@@ -80,6 +80,7 @@ fun MainScreen(
     val transportMode by viewModel.transportMode.collectAsState()
     val bluetoothSnapshot by viewModel.bluetoothSnapshot.collectAsState()
     val bluetoothBridgeHost by viewModel.bluetoothBridgeHost.collectAsState()
+    val usbBridgeStatus by viewModel.usbBridgeStatus.collectAsState()
     val rootAvailable by viewModel.rootAvailable.collectAsState()
     val gadgetEnvironment by viewModel.gadgetEnvironment.collectAsState()
     val hidArmed by viewModel.hidArmed.collectAsState()
@@ -102,6 +103,7 @@ fun MainScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var currentPage by rememberSaveable { mutableStateOf(AppPage.CONNECT) }
+    var gamepadFullscreen by rememberSaveable { mutableStateOf(false) }
     var pendingBtAction by remember { mutableStateOf(PendingBtAction.NONE) }
     val softwareKeyboardController = LocalSoftwareKeyboardController.current
 
@@ -168,6 +170,9 @@ fun MainScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshBluetoothState()
+                if (viewModel.transportMode.value == TransportMode.USB_BRIDGE) {
+                    viewModel.refreshUsbBridge()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -181,6 +186,9 @@ fun MainScreen(
         if (currentPage != AppPage.QUICK_TYPE) {
             softwareKeyboardController?.hide()
         }
+        if (currentPage != AppPage.CONTROLLER) {
+            gamepadFullscreen = false
+        }
     }
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
@@ -189,51 +197,53 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            TabRow(
-                selectedTabIndex = currentPage.ordinal,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                AppPage.entries.forEach { page ->
-                    val btAnyConnected = transportMode == TransportMode.BLUETOOTH &&
-                        (hidArmed || bluetoothBridgeHost != null)
-                    val connectActive = hidArmed || btAnyConnected
-                    val icon = when (page) {
-                        AppPage.CONNECT -> when {
-                            btAnyConnected -> Icons.Filled.BluetoothConnected
-                            transportMode == TransportMode.BLUETOOTH ->
-                                Icons.Filled.Bluetooth
-                            else -> Icons.Filled.Usb
+            if (!(currentPage == AppPage.CONTROLLER && gamepadFullscreen)) {
+                TabRow(
+                    selectedTabIndex = currentPage.ordinal,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    AppPage.entries.forEach { page ->
+                        val btAnyConnected = transportMode == TransportMode.BLUETOOTH &&
+                            (hidArmed || bluetoothBridgeHost != null)
+                        val connectActive = hidArmed || btAnyConnected
+                        val icon = when (page) {
+                            AppPage.CONNECT -> when {
+                                btAnyConnected -> Icons.Filled.BluetoothConnected
+                                transportMode == TransportMode.BLUETOOTH ->
+                                    Icons.Filled.Bluetooth
+                                else -> Icons.Filled.Usb
+                            }
+                            AppPage.FULL_KEYBOARD -> Icons.Filled.Keyboard
+                            AppPage.QUICK_TYPE -> Icons.Filled.Edit
+                            AppPage.TRACKPAD -> Icons.Filled.TouchApp
+                            AppPage.CONTROLLER -> Icons.Filled.SportsEsports
                         }
-                        AppPage.FULL_KEYBOARD -> Icons.Filled.Keyboard
-                        AppPage.QUICK_TYPE -> Icons.Filled.Edit
-                        AppPage.TRACKPAD -> Icons.Filled.TouchApp
-                        AppPage.CONTROLLER -> Icons.Filled.SportsEsports
+                        Tab(
+                            selected = currentPage == page,
+                            onClick = { currentPage = page },
+                            text = {
+                                Text(
+                                    text = page.title,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = if (page == AppPage.CONNECT && connectActive) {
+                                        ArmedGreen
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    }
+                                )
+                            }
+                        )
                     }
-                    Tab(
-                        selected = currentPage == page,
-                        onClick = { currentPage = page },
-                        text = {
-                            Text(
-                                text = page.title,
-                                fontSize = 10.sp,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        },
-                        icon = {
-                            Icon(
-                                imageVector = icon,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                                tint = if (page == AppPage.CONNECT && connectActive) {
-                                    ArmedGreen
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                }
-                            )
-                        }
-                    )
                 }
             }
 
@@ -243,6 +253,7 @@ fun MainScreen(
                         transportMode = transportMode,
                         bluetoothSnapshot = bluetoothSnapshot,
                         bluetoothBridgeHost = bluetoothBridgeHost,
+                        usbBridgeStatus = usbBridgeStatus,
                         rootAvailable = rootAvailable,
                         gadgetEnvironment = gadgetEnvironment,
                         hidArmed = hidArmed,
@@ -290,6 +301,18 @@ fun MainScreen(
                             try {
                                 context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
                             } catch (_: Exception) {
+                            }
+                        },
+                        onToggleUsbBridge = viewModel::toggleUsbBridge,
+                        onRefreshUsbBridge = viewModel::refreshUsbBridge,
+                        onOpenTetherSettings = {
+                            try {
+                                context.startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+                            } catch (_: Exception) {
+                                try {
+                                    context.startActivity(Intent(Settings.ACTION_SETTINGS))
+                                } catch (_: Exception) {
+                                }
                             }
                         },
                         onToggleHid = viewModel::toggleHid,
@@ -389,6 +412,8 @@ fun MainScreen(
                         transportMode = transportMode,
                         bluetoothBridgeHost = bluetoothBridgeHost,
                         controllerStyle = controllerStyle,
+                        isFullscreen = gamepadFullscreen,
+                        onToggleFullscreen = { gamepadFullscreen = !gamepadFullscreen },
                         onToggleControllerStyle = viewModel::setControllerStyle,
                         onButtonChange = viewModel::setGamepadButton,
                         onDpadChange = viewModel::setGamepadDpad,

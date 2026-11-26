@@ -50,10 +50,13 @@ fun QuickTypeScreen(
                 )
             ) {
                 Text(
-                    text = if (transportMode == TransportMode.BLUETOOTH) {
-                        "Bluetooth HID is not connected. Connect to a host in the Connect tab to send keystrokes."
-                    } else {
-                        "USB HID is currently DISARMED. Arm it in the Connect tab to send keystrokes."
+                    text = when (transportMode) {
+                        TransportMode.BLUETOOTH ->
+                            "Bluetooth HID is not connected. Connect to a host in the Connect tab to send keystrokes."
+                        TransportMode.USB_BRIDGE ->
+                            "USB Bridge is waiting for PC. Plug in USB cable (USB Tethering or USB Debugging) and run PocketPadXboxBridge.exe."
+                        TransportMode.USB_ROOT ->
+                            "USB HID is currently DISARMED. Arm it in the Connect tab to send keystrokes."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,

@@ -76,6 +76,8 @@ fun TrackpadScreen(
                     text = when {
                         !hidArmed && transportMode == TransportMode.BLUETOOTH ->
                             "Bluetooth HID is not connected. Connect to a host in the Connect tab to use the trackpad."
+                        !hidArmed && transportMode == TransportMode.USB_BRIDGE ->
+                            "USB Bridge is waiting for PC. Plug in USB cable (USB Tethering or USB Debugging) and run PocketPadXboxBridge.exe."
                         !hidArmed ->
                             "USB HID is DISARMED. Arm it in the Connect tab to use the trackpad."
                         else ->

@@ -2,20 +2,21 @@
 
 ![preview](./images/preview.png)
 <p align="center">
-  <b>Dual-Mode HID Virtual Keyboard, Trackpad &amp; Gamepad for Android</b><br>
-  <b>No-Root Bluetooth HID</b> + <b>Root USB Gadget HID</b> • Built with Jetpack Compose &amp; Material You (Material 3)
+  <b>Dual-Mode Wireless &amp; Wired Virtual Keyboard, Trackpad &amp; Gamepad for Android</b><br>
+  <b>No-Root Bluetooth HID</b> + <b>No-Root USB Bridge (250 Hz)</b> + <b>Root USB Gadget HID</b> • Jetpack Compose &amp; Material You
 </p>
 
 ---
 
 ## Overview
 
-**PocketKeyboard** turns your Android smartphone into a standard **Human Interface Device (HID) Keyboard + 3-Button Mouse/Trackpad + Gamepad** with two transport modes:
+**PocketKeyboard** turns your Android smartphone into a virtual **Keyboard + 3-Button Mouse/Trackpad + Gamepad (Xbox / PS5)** across three transport modes:
 
-1. **Bluetooth HID (No Root, Default on Android 9+):** Uses Android's built-in `BluetoothHidDevice` profile to connect wirelessly to Windows, macOS, Linux, ChromeOS, Android TVs, tablets, and Steam Deck—no root and no USB cable required.
-2. **USB HID (Root):** Uses the Linux kernel's USB gadget driver (`ConfigFS`, `/dev/hidg*`, or legacy `android_usb`) over a USB data cable. Recognized natively by **UEFI/BIOS menus, bootloaders, recovery consoles, Linux, Windows, macOS, and ChromeOS**.
+1. **Bluetooth (No Root, Default on Android 9+):** Uses `BluetoothHidDevice` for wireless Keyboard + Trackpad + Gamepad (plus an automatic Bluetooth Direct RFCOMM Bridge for Windows). Works with **zero PC companion software** on Windows, macOS, Linux, ChromeOS, Android TV, and Steam Deck.
+2. **USB Bridge (No Root, ~1–4 ms Wired):** Streams Gamepad, Trackpad, and Keyboard over a wired USB cable at **250 Hz (`4 ms`) with `0 ms` instant button wakeup** to [`pc-xbox-bridge/PocketPadXboxBridge.exe`](./pc-xbox-bridge/PocketPadXboxBridge.exe) — using either **USB Tethering (raw UDP, ~0.5–1.5 ms)** or **USB Debugging / ADB (`TCP_NODELAY`, ~2–4 ms, preserves PC Wi-Fi/ping)**.
+3. **USB HID (Root):** Uses the Linux kernel's USB gadget driver (`ConfigFS`, `/dev/hidg*`, or legacy `android_usb`) over a USB data cable. Recognized natively by **UEFI/BIOS menus, bootloaders, recovery consoles, Linux, Windows, macOS, and ChromeOS**.
 
-Keyboard, Trackpad, and DirectInput/Steam/Linux/Android Gamepad work with **zero PC companion software**. For Windows games that require an **XInput (Xbox 360) controller**, run the included [`pc-xbox-bridge/PocketPadXboxBridge.exe`](./pc-xbox-bridge/PocketPadXboxBridge.exe) bridge (uses `ViGEmBus`).
+For Windows PC games that require an **XInput (Xbox 360) controller** — or for **no-root ~1–4 ms wired USB Keyboard + Mouse + Xbox 360** — run the included [`pc-xbox-bridge/PocketPadXboxBridge.exe`](./pc-xbox-bridge/PocketPadXboxBridge.exe) bridge (uses `ViGEmBus` + Win32 `SendInput`).
 
 ---
 
@@ -23,17 +24,18 @@ Keyboard, Trackpad, and DirectInput/Steam/Linux/Android Gamepad work with **zero
 
 - **Material You Design**: Dynamic color theming that adapts to your wallpaper on Android 12+ (Material 3), with dark/light mode support.
 - **5-Page Interface**:
-  1. **Connect**: Switch between **Bluetooth (No Root)** and **USB HID (Root)**, manage Bluetooth discoverability and paired hosts, check root/USB gadget diagnostics (`ConfigFS` path, `UDC`, `/dev/hidg*` nodes), pick your **Controller Layout** (`Xbox` / `PS5`), and tune **Trackpad Sensitivity**.
+  1. **Connect**: Switch between **Bluetooth**, **USB Bridge (No Root • Fast)**, and **USB Root (BIOS HID)**, manage Bluetooth discoverability and paired hosts, view local USB Tethering IPs, check root/USB gadget diagnostics (`ConfigFS` path, `UDC`, `/dev/hidg*` nodes), pick your **Controller Layout** (`Xbox` / `PS5`), and tune **Trackpad Sensitivity**.
   2. **Keyboard**: Complete 6-row physical keyboard (`Esc`, `F1`–`F12`, `Del`, numbers/symbols, QWERTY, `Caps`, `Enter`, `Shift`, `Ctrl`, `Win`, `Alt`, `Space`, Arrow keys).
      - In **landscape**, the keyboard fills the entire screen.
      - In **portrait**, keys keep a natural compact height with an optional **Trackpad** below (controlled by *"Enable trackpad on vertical full keyboard"*).
   3. **Quick**: Uses your Android system virtual keyboard (e.g., Gboard) for fast typing, swipe, and autocorrect—live-streaming keystrokes and deletions over HID, with quick chips (`Enter`, `Tab`, `Esc`, `Backspace`, `Ctrl+C`, `Ctrl+V`).
   4. **Trackpad**: Full-screen touch trackpad with adjustable **Trackpad Sensitivity** (`0.50x`–`2.50x`), adaptive pointer acceleration, lossless sub-pixel tracking, 2-finger-to-1-finger cursor jump protection, **Left / Middle / Right** physical mouse buttons (supports press-and-hold), 2-finger scroll wheel, 2-finger tap for right-click, 1-finger tap for left-click, and **double-tap & drag** (second tap holds Left Mouse Button until finger release).
-  5. **Gamepad (`Xbox` / `PS5` styles)**: Multi-touch virtual controller with a 1-tap `XBOX ⇄ PS5` toggle supporting **Xbox (`A B X Y`, `LT`/`LB`/`RB`/`RT`, `View`/`Menu`/`Xbox`, `LS`/`RS`)** and **PS5 DualSense (`✕ ○ □ △`, `L2`/`L1`/`R1`/`R2`, `Create`/`Options`/`PS`, `L3`/`R3`)** layouts, analog slide triggers, 8-way split D-Pad, dual thumbsticks, Touchpad, and Mute.
+  5. **Gamepad (`Xbox` / `PS5` styles)**: Multi-touch virtual controller with a 1-tap `XBOX ⇄ PS5` toggle, optional **FULL / TABS** fullscreen mode, ergonomic Xbox (outer-left thumbstick) vs PS5 DualSense layouts, **floating-origin dynamic thumbsticks** (`1.35` precision curve + smooth radial deadzone), relative-slide analog triggers, 8-way split D-Pad, Touchpad, and Mute.
 - **Modifier Key Mode (Toggle vs Hold)**: Switch between **TOGGLE** (sticky tap-to-lock/unlock) and **HOLD** (momentary press-and-release with multi-touch support) for `Shift`, `Ctrl`, `Alt`, and `Win`.
-- **Low-Latency HID Streaming**:
+- **Ultra-Low-Latency Streaming**:
+  - **USB Bridge (No Root)** runs at **250 Hz (`4 ms`)** over USB Tethering (raw UDP) or ADB (`TCP_NODELAY`) with **0 ms instant wakeup** on button/D-pad/mouse-click transitions.
   - Bluetooth registers with low-latency HID QoS (`11.25ms` target latency, falling back cleanly if an OEM stack rejects QoS) and uses cached permission checks to avoid per-frame binder IPC.
-  - Trackpad and Gamepad use dedicated `Thread.MAX_PRIORITY`, zero-allocation, monotonic-deadline coalescing workers (`11ms` over Bluetooth, `4ms` direct / `14ms` `su` over USB) so high-frequency touch events never build up lag.
+  - Trackpad and Gamepad use dedicated `Thread.MAX_PRIORITY`, zero-allocation, monotonic-deadline coalescing workers (`4ms` over USB Bridge or direct USB Root, `14ms` `su` USB Root, `11ms` over Bluetooth) paired with non-blocking `GamepadCoalescer` (`timeBeginPeriod(1)`) on Windows so stale frames never pile up lag.
 
 ---
 
@@ -61,25 +63,30 @@ Keyboard, Trackpad, and DirectInput/Steam/Linux/Android Gamepad work with **zero
 Most Windows PC games only listen to **XInput (Xbox controllers)** and ignore Generic DirectInput HID controllers. In addition, Windows aggressively caches Bluetooth HID descriptors from the first time you paired your phone (so if you paired before Gamepad was added, Windows only sees Keyboard + Mouse).
 
 `pc-xbox-bridge/PocketPadXboxBridge.exe` solves both automatically with zero manual button mapping:
-- **Bluetooth Direct Bridge (RFCOMM):** Connects directly to PocketKeyboard over Bluetooth without needing to unpair/re-pair on Windows, bypassing stale Windows Bluetooth HID caches while Keyboard & Mouse continue working over Bluetooth HID.
-- **USB & Bluetooth HID Passthrough:** Also attaches directly to PocketKeyboard's HID Gamepad endpoint when exposed over USB (`hidg2`) or freshly-paired Bluetooth HID (`Col03`).
+- **USB Tethering Bridge (No Root, ~0.5–1.5 ms Raw UDP):** Auto-discovers Android's USB RNDIS/NCM gateway and streams **Xbox 360 (ViGEmBus) + Mouse + Keyboard (`SendInput`)** at 250 Hz (`0 ms` button wakeup).
+- **USB Cable via ADB Tunnel (No Root, ~2–4 ms `TCP_NODELAY`):** Automatically runs `adb forward tcp:27189 tcp:27189` and streams **Xbox 360 + Mouse + Keyboard** without affecting your PC's Wi-Fi or online game routing.
+- **Bluetooth Direct Bridge (No Root RFCOMM):** Connects directly to PocketKeyboard over Bluetooth without needing to unpair/re-pair on Windows, bypassing stale Windows Bluetooth HID caches while Keyboard & Mouse continue working over Bluetooth HID.
+- **USB Root & Bluetooth HID Passthrough:** Also attaches directly to PocketKeyboard's HID Gamepad endpoint when exposed over USB Root (`hidg2`) or freshly-paired Bluetooth HID (`Col03`).
 - Mirrors controller state into **ViGEmBus** as a real **Xbox 360 (XInput) controller** (`0x045E` / `0x028E`).
 
 > **Note on real PS5 consoles:** Actual PlayStation 5 consoles require Sony's hardware cryptographic authentication chip and reject emulated Bluetooth/USB controllers.
 
 ### Running the Bridge
 1. Make sure the **ViGEmBus** driver (`Nefarius Virtual Gamepad Emulation Service`) is installed on your Windows PC.
-2. Pair your phone with Windows once (even an existing PocketKeyboard pairing works!), keep Bluetooth on in **PocketKeyboard**, and double-click [`pc-xbox-bridge/PocketPadXboxBridge.exe`](./pc-xbox-bridge/PocketPadXboxBridge.exe).
-3. Keep the bridge console window open while playing — it auto-connects via **USB HID**, **Bluetooth HID**, or **Bluetooth Direct Bridge**, plugs in a virtual Xbox 360 controller, and handles disconnects/reconnects.
-4. Press `Ctrl+C` or close the window to unplug the virtual controller cleanly.
+2. Choose either **USB Bridge** mode on your phone (plug in USB with **USB Tethering** or **USB Debugging**) or **Bluetooth** mode, then double-click [`pc-xbox-bridge/PocketPadXboxBridge.exe`](./pc-xbox-bridge/PocketPadXboxBridge.exe).
+3. Keep the bridge console window open while playing — it auto-selects the fastest active path (**USB Tethering UDP** → **USB ADB TCP** → **Native HID** → **Bluetooth Direct Bridge**), plugs in a virtual Xbox 360 controller, injects Mouse/Keyboard over USB Bridge, and handles disconnects cleanly.
+4. Press `Ctrl+C` or close the window to unplug the virtual controller and release held keys cleanly.
 
 ### Bridge CLI Options
 ```powershell
-# Verify ViGEmBus driver and virtual Xbox 360 controller plug/unplug
+# Verify ViGEmBus driver, v2 protocol parser, HID keymap & virtual Xbox 360 controller
 .\pc-xbox-bridge\PocketPadXboxBridge.exe --test
 
-# List HID gamepads, paired Bluetooth Direct Bridge candidates, and detect stale BT HID caches
+# List USB Tethering IPs, ADB path, HID gamepads, BT candidates & stale BT cache diagnostics
 .\pc-xbox-bridge\PocketPadXboxBridge.exe --list
+
+# Optional: manually target a specific phone IP over USB Tethering / LAN UDP
+.\pc-xbox-bridge\PocketPadXboxBridge.exe --udp 192.168.42.129
 ```
 
 ### Xbox / PS5 → XInput Mapping
@@ -100,7 +107,7 @@ Most Windows PC games only listen to **XInput (Xbox controllers)** and ignore Ge
 g++ -O2 -std=c++17 -Wall -Wextra -static -static-libgcc -static-libstdc++ `
   pc-xbox-bridge/PocketPadXboxBridge.cpp `
   -o pc-xbox-bridge/PocketPadXboxBridge.exe `
-  -lhid -lsetupapi -lws2_32 -lbthprops
+  -lhid -lsetupapi -lws2_32 -lbthprops -liphlpapi -lwinmm
 ```
 
 ---
@@ -165,6 +172,7 @@ PocketKeyboard/
 │   │   ├── HidCharMapper.kt         # ASCII character to (modifier, keyCode) mapper for Quick Type
 │   │   ├── BluetoothHidManager.kt   # API 28+ BluetoothHidDevice registration, QoS & host connections
 │   │   ├── BluetoothGamepadBridgeServer.kt # No-root Bluetooth RFCOMM gamepad bridge for Windows
+│   │   ├── UsbBridgeServer.kt       # No-root 500 Hz USB Tethering (UDP) + ADB (TCP) PocketBridge v2 server
 │   │   ├── UsbGadgetManager.kt      # ConfigFS (/config/usb_gadget, /sys/kernel/config/usb_gadget, g1 fallback)
 │   │   └── HidReportSender.kt       # Pluggable USB/Bluetooth keyboard, coalesced mouse & gamepad sender
 │   ├── viewmodel/

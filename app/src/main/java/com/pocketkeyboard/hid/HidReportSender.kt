@@ -10,6 +10,8 @@ interface HidOutputBackend {
     val mouseAvailable: Boolean
     val gamepadAvailable: Boolean
     val mousePollIntervalMs: Long
+    val gamepadPollIntervalMs: Long
+        get() = mousePollIntervalMs
     fun sendKeyboardReport(report: ByteArray): Result<Unit>
     fun sendMouseReport(report: ByteArray)
     fun sendGamepadReport(report: ByteArray)
@@ -157,6 +159,7 @@ private class BluetoothHidOutputBackend(
     override val mouseAvailable: Boolean = true
     override val gamepadAvailable: Boolean = true
     override val mousePollIntervalMs: Long = 11L
+    override val gamepadPollIntervalMs: Long = 11L
 
     override fun sendKeyboardReport(report: ByteArray): Result<Unit> = sendKbd(report)
 
@@ -166,6 +169,28 @@ private class BluetoothHidOutputBackend(
 
     override fun close() {
         // Profile lifecycle is managed by BluetoothHidManager.
+    }
+}
+
+private class UsbBridgeOutputBackend(
+    private val sendKbd: (ByteArray) -> Result<Unit>,
+    private val sendMouse: (ByteArray) -> Unit,
+    private val sendGamepad: (ByteArray) -> Unit
+) : HidOutputBackend {
+
+    override val mouseAvailable: Boolean = true
+    override val gamepadAvailable: Boolean = true
+    override val mousePollIntervalMs: Long = 4L
+    override val gamepadPollIntervalMs: Long = 4L
+
+    override fun sendKeyboardReport(report: ByteArray): Result<Unit> = sendKbd(report)
+
+    override fun sendMouseReport(report: ByteArray) = sendMouse(report)
+
+    override fun sendGamepadReport(report: ByteArray) = sendGamepad(report)
+
+    override fun close() {
+        // Transport lifecycle is managed by UsbBridgeServer.
     }
 }
 
@@ -191,8 +216,10 @@ object HidReportSender {
     private var pendingDy = 0
     private var pendingWheel = 0
     private var pendingButtons = 0
+    private var lastSentMouseButtons = 0
     private val pendingClickQueue = ArrayDeque<Int>()
     private var hasPendingMouse = false
+    private var mouseImmediateWake = false
     @Volatile
     private var mouseWorkerRunning = false
     private var mouseWorkerThread: Thread? = null
@@ -253,6 +280,23 @@ object HidReportSender {
         }
     }
 
+    suspend fun openUsbBridge(
+        sendKbd: (ByteArray) -> Result<Unit>,
+        sendMouse: (ByteArray) -> Unit,
+        sendGamepad: (ByteArray) -> Unit
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            close()
+            val backend = UsbBridgeOutputBackend(sendKbd, sendMouse, sendGamepad)
+            activeBackend = backend
+            startMouseWorker()
+            startGamepadWorker()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun close() = withContext(Dispatchers.IO) {
         stopMouseWorker()
         stopGamepadWorker()
@@ -269,8 +313,10 @@ object HidReportSender {
             pendingDy = 0
             pendingWheel = 0
             pendingButtons = 0
+            lastSentMouseButtons = 0
             pendingClickQueue.clear()
             hasPendingMouse = false
+            mouseImmediateWake = false
         }
 
         val t = Thread({
@@ -283,12 +329,32 @@ object HidReportSender {
                 val dy: Int
                 val wheel: Int
                 val clickMask: Int?
+                val urgent: Boolean
 
                 synchronized(mouseLock) {
-                    while (mouseWorkerRunning && !hasPendingMouse && pendingClickQueue.isEmpty()) {
-                        nextTickNs = 0L
+                    while (mouseWorkerRunning) {
+                        val hasWork = hasPendingMouse || pendingClickQueue.isNotEmpty()
+                        if (!hasWork) {
+                            nextTickNs = 0L
+                            try {
+                                mouseLock.wait()
+                            } catch (_: InterruptedException) {
+                                break
+                            }
+                            continue
+                        }
+
+                        if (mouseImmediateWake || nextTickNs == 0L) {
+                            break
+                        }
+
+                        val remainNs = nextTickNs - System.nanoTime()
+                        if (remainNs <= 0L) {
+                            break
+                        }
+
                         try {
-                            mouseLock.wait()
+                            mouseLock.wait(remainNs / 1_000_000L, (remainNs % 1_000_000L).toInt())
                         } catch (_: InterruptedException) {
                             break
                         }
@@ -300,7 +366,10 @@ object HidReportSender {
                     dx = pendingDx.coerceIn(-127, 127)
                     dy = pendingDy.coerceIn(-127, 127)
                     wheel = pendingWheel.coerceIn(-127, 127)
+                    urgent = mouseImmediateWake
 
+                    lastSentMouseButtons = buttons
+                    mouseImmediateWake = false
                     pendingDx -= dx
                     pendingDy -= dy
                     pendingWheel -= wheel
@@ -325,27 +394,21 @@ object HidReportSender {
                     reportBuf[2] = 0
                     reportBuf[3] = 0
                     backend.sendMouseReport(reportBuf)
-                    nextTickNs = System.nanoTime()
+                    nextTickNs = System.nanoTime() + backend.mousePollIntervalMs * 1_000_000L
                 } else {
                     reportBuf[0] = buttons.toByte()
                     reportBuf[1] = dx.toByte()
                     reportBuf[2] = dy.toByte()
                     reportBuf[3] = wheel.toByte()
                     backend.sendMouseReport(reportBuf)
-                }
 
-                val intervalNs = backend.mousePollIntervalMs * 1_000_000L
-                val nowNs = System.nanoTime()
-                nextTickNs = if (nextTickNs == 0L) {
-                    nowNs + intervalNs
-                } else {
-                    maxOf(nextTickNs + intervalNs, nowNs)
-                }
-                val sleepNs = nextTickNs - nowNs
-                if (sleepNs > 0L) {
-                    try {
-                        Thread.sleep(sleepNs / 1_000_000L, (sleepNs % 1_000_000L).toInt())
-                    } catch (_: InterruptedException) { }
+                    val intervalNs = backend.mousePollIntervalMs * 1_000_000L
+                    val nowNs = System.nanoTime()
+                    nextTickNs = if (urgent || nextTickNs == 0L) {
+                        nowNs + intervalNs
+                    } else {
+                        maxOf(nextTickNs + intervalNs, nowNs)
+                    }
                 }
             }
         }, "PocketKeyboard-MouseWorker")
@@ -399,10 +462,28 @@ object HidReportSender {
                 val urgent: Boolean
 
                 synchronized(gamepadLock) {
-                    while (gamepadWorkerRunning && !hasPendingGamepad) {
-                        nextTickNs = 0L
+                    while (gamepadWorkerRunning) {
+                        if (!hasPendingGamepad) {
+                            nextTickNs = 0L
+                            try {
+                                gamepadLock.wait()
+                            } catch (_: InterruptedException) {
+                                break
+                            }
+                            continue
+                        }
+
+                        if (gamepadImmediateWake || nextTickNs == 0L) {
+                            break
+                        }
+
+                        val remainNs = nextTickNs - System.nanoTime()
+                        if (remainNs <= 0L) {
+                            break
+                        }
+
                         try {
-                            gamepadLock.wait()
+                            gamepadLock.wait(remainNs / 1_000_000L, (remainNs % 1_000_000L).toInt())
                         } catch (_: InterruptedException) {
                             break
                         }
@@ -438,18 +519,12 @@ object HidReportSender {
                 reportBuf[8] = r2.coerceIn(0, 255).toByte()
                 backend.sendGamepadReport(reportBuf)
 
-                val intervalNs = backend.mousePollIntervalMs * 1_000_000L
+                val intervalNs = backend.gamepadPollIntervalMs * 1_000_000L
                 val nowNs = System.nanoTime()
-                if (urgent || nextTickNs == 0L) {
-                    nextTickNs = nowNs + intervalNs
+                nextTickNs = if (urgent || nextTickNs == 0L) {
+                    nowNs + intervalNs
                 } else {
-                    nextTickNs = maxOf(nextTickNs + intervalNs, nowNs)
-                }
-                val sleepNs = nextTickNs - nowNs
-                if (sleepNs > 0L) {
-                    try {
-                        Thread.sleep(sleepNs / 1_000_000L, (sleepNs % 1_000_000L).toInt())
-                    } catch (_: InterruptedException) { }
+                    maxOf(nextTickNs + intervalNs, nowNs)
                 }
             }
         }, "PocketKeyboard-GamepadWorker")
@@ -510,6 +585,9 @@ object HidReportSender {
     fun sendMouseReportAsync(buttons: Int, dx: Int, dy: Int, wheel: Int = 0) {
         if (activeBackend?.mouseAvailable != true || !mouseWorkerRunning) return
         synchronized(mouseLock) {
+            if (buttons != lastSentMouseButtons) {
+                mouseImmediateWake = true
+            }
             pendingButtons = buttons
             pendingDx += dx
             pendingDy += dy
@@ -524,6 +602,7 @@ object HidReportSender {
         synchronized(mouseLock) {
             pendingButtons = baseButtons
             pendingClickQueue.addLast(buttonMask)
+            mouseImmediateWake = true
             mouseLock.notifyAll()
         }
     }

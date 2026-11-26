@@ -13,6 +13,8 @@ import com.pocketkeyboard.hid.HidCharMapper
 import com.pocketkeyboard.hid.HidGamepadMap
 import com.pocketkeyboard.hid.HidKeyMap
 import com.pocketkeyboard.hid.HidReportSender
+import com.pocketkeyboard.hid.UsbBridgeServer
+import com.pocketkeyboard.hid.UsbBridgeStatus
 import com.pocketkeyboard.hid.UsbGadgetManager
 import com.pocketkeyboard.root.RootShell
 import com.pocketkeyboard.ui.components.KeyDef
@@ -24,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 enum class ConnectionStatus {
     DISCONNECTED, CONNECTING, CONNECTED, ERROR
@@ -31,6 +34,7 @@ enum class ConnectionStatus {
 
 enum class TransportMode {
     BLUETOOTH,
+    USB_BRIDGE,
     USB_ROOT
 }
 
@@ -89,6 +93,9 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
 
     private val _bluetoothBridgeHost = MutableStateFlow<String?>(null)
     val bluetoothBridgeHost: StateFlow<String?> = _bluetoothBridgeHost.asStateFlow()
+
+    private val _usbBridgeStatus = MutableStateFlow(UsbBridgeStatus())
+    val usbBridgeStatus: StateFlow<UsbBridgeStatus> = _usbBridgeStatus.asStateFlow()
 
     private val _connectionStatus = MutableStateFlow(ConnectionStatus.DISCONNECTED)
     val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
@@ -152,10 +159,30 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     private var btSenderOpen: Boolean = false
     private val btSessionMutex = Mutex()
 
+    private var usbBridgeSenderOpen: Boolean = false
+    private val usbBridgeMutex = Mutex()
+
     private var bluetoothHidManager: BluetoothHidManager? = null
     private var bluetoothGamepadBridge: BluetoothGamepadBridgeServer? = null
+    private val usbBridgeServer: UsbBridgeServer = UsbBridgeServer { connected, _ ->
+        viewModelScope.launch {
+            syncUsbBridgeSession(connected)
+        }
+    }
 
     init {
+        viewModelScope.launch {
+            usbBridgeServer.status.collect { st ->
+                _usbBridgeStatus.value = st
+                if (_transportMode.value == TransportMode.USB_BRIDGE &&
+                    st.errorMessage != null &&
+                    !st.isConnected
+                ) {
+                    _errorMessage.value = st.errorMessage
+                }
+            }
+        }
+
         val bridge = BluetoothGamepadBridgeServer(
             context = application,
             onConnectionChanged = { connected, hostName ->
@@ -228,56 +255,99 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    private suspend fun syncBluetoothSession() = btSessionMutex.withLock {
-        if (_transportMode.value != TransportMode.BLUETOOTH) return@withLock
+    private suspend fun syncBluetoothSession() {
+        btSessionMutex.withLock {
+            if (_transportMode.value != TransportMode.BLUETOOTH) return@withLock
 
-        val hidActive = btHostConnected
-        val bridgeActive = btBridgeConnected
+            val hidActive = btHostConnected
+            val bridgeActive = btBridgeConnected
 
-        if (hidActive || bridgeActive) {
-            if (!btSenderOpen) {
-                val openResult = HidReportSender.openBluetooth(
-                    sendKbd = { report ->
-                        bluetoothHidManager?.sendKeyboardReport(report)
-                            ?: Result.failure(IllegalStateException("Bluetooth HID service is not connected."))
-                    },
-                    sendMouse = { report ->
-                        bluetoothHidManager?.sendMouseReport(report)
-                    },
-                    sendGamepad = { report ->
-                        bluetoothHidManager?.sendGamepadReport(report)
-                        bluetoothGamepadBridge?.sendGamepadReport(report)
+            if (hidActive || bridgeActive) {
+                if (!btSenderOpen) {
+                    val openResult = HidReportSender.openBluetooth(
+                        sendKbd = { report ->
+                            bluetoothHidManager?.sendKeyboardReport(report)
+                                ?: Result.failure(IllegalStateException("Bluetooth HID service is not connected."))
+                        },
+                        sendMouse = { report ->
+                            bluetoothHidManager?.sendMouseReport(report)
+                        },
+                        sendGamepad = { report ->
+                            bluetoothHidManager?.sendGamepadReport(report)
+                            bluetoothGamepadBridge?.sendGamepadReport(report)
+                        }
+                    )
+                    if (openResult.isSuccess) {
+                        btSenderOpen = true
+                    } else {
+                        _hidArmed.value = false
+                        _mouseAvailable.value = false
+                        _gamepadAvailable.value = false
+                        _connectionStatus.value = ConnectionStatus.ERROR
+                        _errorMessage.value = openResult.exceptionOrNull()?.message
+                        return@withLock
                     }
-                )
-                if (openResult.isSuccess) {
-                    btSenderOpen = true
-                } else {
-                    _hidArmed.value = false
-                    _mouseAvailable.value = false
-                    _gamepadAvailable.value = false
-                    _connectionStatus.value = ConnectionStatus.ERROR
-                    _errorMessage.value = openResult.exceptionOrNull()?.message
-                    return@withLock
                 }
-            }
 
-            _hidArmed.value = hidActive
-            _mouseAvailable.value = hidActive
-            _gamepadAvailable.value = true
-            if (hidActive) {
+                _hidArmed.value = hidActive
+                _mouseAvailable.value = hidActive
+                _gamepadAvailable.value = true
+                if (hidActive) {
+                    _connectionStatus.value = ConnectionStatus.CONNECTED
+                    _errorMessage.value = null
+                }
+            } else {
+                if (btSenderOpen) {
+                    HidReportSender.close()
+                    btSenderOpen = false
+                }
+                _hidArmed.value = false
+                _mouseAvailable.value = false
+                _gamepadAvailable.value = false
+                _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                resetInputState()
+            }
+        }
+    }
+
+    private suspend fun syncUsbBridgeSession(connected: Boolean) {
+        usbBridgeMutex.withLock {
+            if (_transportMode.value != TransportMode.USB_BRIDGE) return@withLock
+
+            if (connected) {
+                if (!usbBridgeSenderOpen) {
+                    val openResult = HidReportSender.openUsbBridge(
+                        sendKbd = { usbBridgeServer.sendKeyboardReport(it) },
+                        sendMouse = { usbBridgeServer.sendMouseReport(it) },
+                        sendGamepad = { usbBridgeServer.sendGamepadReport(it) }
+                    )
+                    if (openResult.isSuccess) {
+                        usbBridgeSenderOpen = true
+                    } else {
+                        _hidArmed.value = false
+                        _mouseAvailable.value = false
+                        _gamepadAvailable.value = false
+                        _connectionStatus.value = ConnectionStatus.ERROR
+                        _errorMessage.value = openResult.exceptionOrNull()?.message
+                        return@withLock
+                    }
+                }
+                _hidArmed.value = true
+                _mouseAvailable.value = true
+                _gamepadAvailable.value = true
                 _connectionStatus.value = ConnectionStatus.CONNECTED
                 _errorMessage.value = null
+            } else {
+                if (usbBridgeSenderOpen) {
+                    HidReportSender.close()
+                    usbBridgeSenderOpen = false
+                }
+                _hidArmed.value = false
+                _mouseAvailable.value = false
+                _gamepadAvailable.value = false
+                _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                resetInputState()
             }
-        } else {
-            if (btSenderOpen) {
-                HidReportSender.close()
-                btSenderOpen = false
-            }
-            _hidArmed.value = false
-            _mouseAvailable.value = false
-            _gamepadAvailable.value = false
-            _connectionStatus.value = ConnectionStatus.DISCONNECTED
-            resetInputState()
         }
     }
 
@@ -294,6 +364,21 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
                 TransportMode.USB_ROOT -> {
                     if (_hidArmed.value) {
                         disarmUsbHid()
+                    }
+                }
+
+                TransportMode.USB_BRIDGE -> {
+                    usbBridgeMutex.withLock {
+                        withContext(Dispatchers.IO) {
+                            usbBridgeServer.stop()
+                        }
+                        HidReportSender.close()
+                        usbBridgeSenderOpen = false
+                        _hidArmed.value = false
+                        _mouseAvailable.value = false
+                        _gamepadAvailable.value = false
+                        _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                        resetInputState()
                     }
                 }
 
@@ -319,16 +404,58 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
 
             _transportMode.value = mode
 
-            if (mode == TransportMode.BLUETOOTH) {
-                refreshBluetoothState()
-                val snap = _bluetoothSnapshot.value
-                _errorMessage.value = snap.errorMessage
-                _connectionStatus.value = ConnectionStatus.DISCONNECTED
-            } else {
-                refreshUsbEnvironmentInternal()
+            when (mode) {
+                TransportMode.BLUETOOTH -> {
+                    refreshBluetoothState()
+                    val snap = _bluetoothSnapshot.value
+                    _errorMessage.value = snap.errorMessage
+                    _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                }
+
+                TransportMode.USB_BRIDGE -> {
+                    withContext(Dispatchers.IO) {
+                        usbBridgeServer.start()
+                    }
+                    _connectionStatus.value = if (usbBridgeServer.status.value.isConnected) {
+                        ConnectionStatus.CONNECTED
+                    } else {
+                        ConnectionStatus.DISCONNECTED
+                    }
+                }
+
+                TransportMode.USB_ROOT -> {
+                    refreshUsbEnvironmentInternal()
+                }
             }
 
             _isLoading.value = false
+        }
+    }
+
+    // ── No-Root USB Bridge actions ──
+
+    fun toggleUsbBridge(enable: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (enable) {
+                usbBridgeServer.start()
+            } else {
+                usbBridgeMutex.withLock {
+                    usbBridgeServer.stop()
+                    HidReportSender.close()
+                    usbBridgeSenderOpen = false
+                    _hidArmed.value = false
+                    _mouseAvailable.value = false
+                    _gamepadAvailable.value = false
+                    _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                    resetInputState()
+                }
+            }
+        }
+    }
+
+    fun refreshUsbBridge() {
+        viewModelScope.launch(Dispatchers.IO) {
+            usbBridgeServer.refreshLocalAddresses()
         }
     }
 
@@ -776,6 +903,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         }
         val shouldDisableUsb = _transportMode.value == TransportMode.USB_ROOT && _hidArmed.value
         CoroutineScope(Dispatchers.IO).launch {
+            usbBridgeServer.release()
             HidReportSender.close()
             if (shouldDisableUsb) {
                 UsbGadgetManager.disable()
