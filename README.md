@@ -58,25 +58,27 @@ Keyboard, Trackpad, and DirectInput/Steam/Linux/Android Gamepad work with **zero
 
 ## Windows PC Xbox 360 Bridge (`pc-xbox-bridge`)
 
-Most Windows PC games only listen to **XInput (Xbox controllers)** and ignore Generic DirectInput HID controllers. Because non-root Android cannot spoof Microsoft's hardware Vendor/Product ID over Bluetooth, Windows exposes PocketKeyboard's Gamepad as DirectInput (which works in `joy.cpl` testers and Steam Input, but not directly in XInput-only games).
+Most Windows PC games only listen to **XInput (Xbox controllers)** and ignore Generic DirectInput HID controllers. In addition, Windows aggressively caches Bluetooth HID descriptors from the first time you paired your phone (so if you paired before Gamepad was added, Windows only sees Keyboard + Mouse).
 
-`pc-xbox-bridge/PocketPadXboxBridge.exe` solves this with zero manual button mapping: it automatically discovers PocketKeyboard's Bluetooth (or USB) HID Gamepad via Windows `hid.dll` and mirrors it into **ViGEmBus** as a native **Xbox 360 (XInput) controller** (`0x045E` / `0x028E`).
+`pc-xbox-bridge/PocketPadXboxBridge.exe` solves both automatically with zero manual button mapping:
+- **Bluetooth Direct Bridge (RFCOMM):** Connects directly to PocketKeyboard over Bluetooth without needing to unpair/re-pair on Windows, bypassing stale Windows Bluetooth HID caches while Keyboard & Mouse continue working over Bluetooth HID.
+- **USB & Bluetooth HID Passthrough:** Also attaches directly to PocketKeyboard's HID Gamepad endpoint when exposed over USB (`hidg2`) or freshly-paired Bluetooth HID (`Col03`).
+- Mirrors controller state into **ViGEmBus** as a real **Xbox 360 (XInput) controller** (`0x045E` / `0x028E`).
 
 > **Note on real PS5 consoles:** Actual PlayStation 5 consoles require Sony's hardware cryptographic authentication chip and reject emulated Bluetooth/USB controllers.
 
 ### Running the Bridge
 1. Make sure the **ViGEmBus** driver (`Nefarius Virtual Gamepad Emulation Service`) is installed on your Windows PC.
-2. Connect your phone to your PC in PocketKeyboard's **Connect** tab (Bluetooth mode).
-3. Double-click [`pc-xbox-bridge/PocketPadXboxBridge.exe`](./pc-xbox-bridge/PocketPadXboxBridge.exe) (or run it from a terminal) and keep the window open while playing.
-   - Automatically detects PocketKeyboard, plugs in a virtual Xbox 360 controller, and handles disconnects/reconnects.
-   - Press `Ctrl+C` or close the window to unplug the virtual controller cleanly.
+2. Pair your phone with Windows once (even an existing PocketKeyboard pairing works!), keep Bluetooth on in **PocketKeyboard**, and double-click [`pc-xbox-bridge/PocketPadXboxBridge.exe`](./pc-xbox-bridge/PocketPadXboxBridge.exe).
+3. Keep the bridge console window open while playing — it auto-connects via **USB HID**, **Bluetooth HID**, or **Bluetooth Direct Bridge**, plugs in a virtual Xbox 360 controller, and handles disconnects/reconnects.
+4. Press `Ctrl+C` or close the window to unplug the virtual controller cleanly.
 
 ### Bridge CLI Options
 ```powershell
 # Verify ViGEmBus driver and virtual Xbox 360 controller plug/unplug
 .\pc-xbox-bridge\PocketPadXboxBridge.exe --test
 
-# List non-ViGEm HID Gamepad devices currently visible to Windows
+# List HID gamepads, paired Bluetooth Direct Bridge candidates, and detect stale BT HID caches
 .\pc-xbox-bridge\PocketPadXboxBridge.exe --list
 ```
 
@@ -98,7 +100,7 @@ Most Windows PC games only listen to **XInput (Xbox controllers)** and ignore Ge
 g++ -O2 -std=c++17 -Wall -Wextra -static -static-libgcc -static-libstdc++ `
   pc-xbox-bridge/PocketPadXboxBridge.cpp `
   -o pc-xbox-bridge/PocketPadXboxBridge.exe `
-  -lhid -lsetupapi
+  -lhid -lsetupapi -lws2_32 -lbthprops
 ```
 
 ---
@@ -162,6 +164,7 @@ PocketKeyboard/
 │   │   ├── HidKeyMap.kt             # USB HID Usage Tables 1.12 scan codes & modifier masks
 │   │   ├── HidCharMapper.kt         # ASCII character to (modifier, keyCode) mapper for Quick Type
 │   │   ├── BluetoothHidManager.kt   # API 28+ BluetoothHidDevice registration, QoS & host connections
+│   │   ├── BluetoothGamepadBridgeServer.kt # No-root Bluetooth RFCOMM gamepad bridge for Windows
 │   │   ├── UsbGadgetManager.kt      # ConfigFS (/config/usb_gadget, /sys/kernel/config/usb_gadget, g1 fallback)
 │   │   └── HidReportSender.kt       # Pluggable USB/Bluetooth keyboard, coalesced mouse & gamepad sender
 │   ├── viewmodel/
@@ -187,10 +190,11 @@ PocketKeyboard/
 
 ## How It Works Under the Hood
 
-### Bluetooth HID (No Root)
-1. **Profile Registration**: `BluetoothHidManager` binds `BluetoothProfile.HID_DEVICE` and registers a 203-byte composite SDP descriptor (`HidDescriptors.BLUETOOTH_COMBO_REPORT_DESCRIPTOR`) with `Report ID 1` for Boot Keyboard (8-byte input report + Caps Lock output LED report), `Report ID 2` for 3-button Mouse + Wheel (4-byte input report), and `Report ID 3` for Gamepad (9-byte input report: 16 buttons, 8-way Hat Switch, `LX/LY/RX/RY/L2/R2`).
-2. **Pairing & Connecting**: Tap **Make Discoverable** in the **Connect** tab and pair from your PC/TV/tablet's Bluetooth settings, or tap **Connect** next to an already-paired host. *(If upgrading from an older PocketKeyboard build, unpair the phone once in Windows Bluetooth settings and re-pair so Windows caches the new Gamepad HID descriptor.)*
-3. **Report Streaming**: `HidReportSender.openBluetooth()` routes keyboard reports and coalesced deadline-paced trackpad/gamepad packets directly to `BluetoothHidDevice.sendReport()`.
+### Bluetooth HID & Direct Gamepad Bridge (No Root)
+1. **Profile Registration**: `BluetoothHidManager` binds `BluetoothProfile.HID_DEVICE` and registers a 203-byte composite SDP descriptor (`HidDescriptors.BLUETOOTH_COMBO_REPORT_DESCRIPTOR`) with `Report ID 1` for Boot Keyboard (8-byte input report + Caps Lock output LED report), `Report ID 2` for 3-button Mouse + Wheel (4-byte input report), and `Report ID 3` for Gamepad (9-byte input report: 16 buttons, 8-way Hat Switch, `LX/LY/RX/RY/L2/R2`), with a `64`-byte QoS token bucket so gamepad frames are never throttled.
+2. **Direct Bluetooth RFCOMM Gamepad Bridge**: `BluetoothGamepadBridgeServer` opens a lightweight Classic Bluetooth RFCOMM listener (`UUID 706b6264-5842-4f58-5041-440000000001`) so `PocketPadXboxBridge.exe` can stream Xbox 360 inputs over Bluetooth even if Windows cached an older Keyboard+Mouse-only HID SDP record.
+3. **Pairing & Connecting**: Tap **Make Discoverable** in the **Connect** tab and pair from your PC/TV/tablet's Bluetooth settings, or tap **Connect** next to an already-paired host. *(To also expose the native Bluetooth HID Gamepad collection in testers without the bridge, unpair once in Windows Bluetooth settings and re-pair so Windows clears its cached SDP descriptor.)*
+4. **Report Streaming**: `HidReportSender.openBluetooth()` routes keyboard/mouse reports via `BluetoothHidDevice.sendReport()` and fans out coalesced deadline-paced gamepad packets to both Bluetooth HID and any connected Bluetooth Direct Bridge client.
 
 ### USB HID (Root)
 1. **Backend Detection**: `UsbGadgetManager.detectEnvironment()` probes `/config/usb_gadget`, `/sys/kernel/config/usb_gadget` (mounting `configfs` if needed), existing `/dev/hidg*` nodes, and legacy `/sys/class/android_usb/android0`.
@@ -208,7 +212,7 @@ PocketKeyboard/
 | Problem | Cause | Solution |
 |---|---|---|
 | **Gamepad works in tester, not in PC games** | Windows PC games usually require XInput (Xbox 360), not Generic DirectInput HID. | Run `pc-xbox-bridge/PocketPadXboxBridge.exe` on your PC (with ViGEmBus), or enable **Generic Controller** in Steam Input. |
-| **Gamepad missing on Windows after APK update** | Windows cached the older HID SDP descriptor without `Report ID 3`. | Remove/forget your phone once in Windows Bluetooth settings and re-pair. |
+| **Gamepad works on USB, not on Bluetooth** | Windows cached an older Keyboard+Mouse Bluetooth HID SDP descriptor (missing `Col03`), or an XInput game needs ViGEmBus. | Run `pc-xbox-bridge/PocketPadXboxBridge.exe` — it auto-connects via Bluetooth Direct Bridge without unpairing. For native BT HID in testers too, remove & re-pair your phone once in Windows Bluetooth settings. |
 | **Trackpad feels too fast or too slow** | Default sensitivity doesn't match your screen/DPI. | Adjust the **Trackpad Sensitivity** slider (`0.50x`–`2.50x`) on the **Connect** tab. |
 | **Bluetooth permission needed** | Android 12+ requires Nearby Devices (`BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE`). | Tap **Grant Bluetooth Permission** on the **Connect** tab. |
 | **Host won't pair or connect over BT** | HID service not active during pairing, or stale host bond. | Turn on Bluetooth HID service / tap **Make Discoverable** first, pair from the host's Bluetooth settings, or unpair on both sides and re-pair. |

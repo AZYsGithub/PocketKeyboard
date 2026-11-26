@@ -1,9 +1,12 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 
+#include <winsock2.h>
 #include <windows.h>
-#include <setupapi.h>
 #include <initguid.h>
+#include <ws2bth.h>
+#include <bluetoothapis.h>
+#include <setupapi.h>
 #include <winioctl.h>
 
 extern "C" {
@@ -28,6 +31,14 @@ DEFINE_GUID(
     0xB0, 0x43, 0xED, 0x0F, 0x93, 0x2F, 0x01, 0x4F
 );
 
+// PocketKeyboard Direct Bluetooth RFCOMM Gamepad Bridge UUID:
+// 706b6264-5842-4f58-5041-440000000001 ("pkbdXBOXPAD\x00\x00\x00\x00\x01")
+DEFINE_GUID(
+    GUID_POCKETPAD_RFCOMM_BRIDGE,
+    0x706B6264, 0x5842, 0x4F58,
+    0x50, 0x41, 0x44, 0x00, 0x00, 0x00, 0x00, 0x01
+);
+
 #ifndef FILE_DEVICE_BUS_EXTENDER
 #define FILE_DEVICE_BUS_EXTENDER 0x0000002a
 #endif
@@ -46,6 +57,10 @@ DEFINE_GUID(
 #define IOCTL_VIGEM_CHECK_VERSION       BUSENUM_W_IOCTL(IOCTL_VIGEM_BASE + 0x002)
 #define IOCTL_VIGEM_WAIT_DEVICE_READY   BUSENUM_W_IOCTL(IOCTL_VIGEM_BASE + 0x003)
 #define IOCTL_XUSB_SUBMIT_REPORT        BUSENUM_W_IOCTL(IOCTL_VIGEM_BASE + 0x201)
+
+static constexpr BYTE BRIDGE_FRAME_HEADER_0 = 0xA5;
+static constexpr BYTE BRIDGE_FRAME_HEADER_1 = 0x5A;
+static constexpr size_t BRIDGE_FRAME_SIZE = 12;
 
 enum VIGEM_TARGET_TYPE_VAL : ULONG {
     VIGEM_TARGET_XBOX360_WIRED = 0
@@ -136,6 +151,42 @@ static std::wstring toLowerW(std::wstring s) {
         ch = static_cast<wchar_t>(towlower(ch));
     }
     return s;
+}
+
+static std::string formatBthAddr(BTH_ADDR addr) {
+    char buf[24]{};
+    std::snprintf(
+        buf,
+        sizeof(buf),
+        "%02X:%02X:%02X:%02X:%02X:%02X",
+        static_cast<unsigned>((addr >> 40) & 0xFF),
+        static_cast<unsigned>((addr >> 32) & 0xFF),
+        static_cast<unsigned>((addr >> 24) & 0xFF),
+        static_cast<unsigned>((addr >> 16) & 0xFF),
+        static_cast<unsigned>((addr >> 8) & 0xFF),
+        static_cast<unsigned>(addr & 0xFF)
+    );
+    return std::string(buf);
+}
+
+static std::string formatMacString(const std::wstring& hex12) {
+    if (hex12.size() != 12) {
+        return std::string(hex12.begin(), hex12.end());
+    }
+    std::string out;
+    out.reserve(17);
+    for (size_t i = 0; i < 12; ++i) {
+        if (i > 0 && (i % 2) == 0) out.push_back(':');
+        wchar_t wc = hex12[i];
+        out.push_back(static_cast<char>(toupper(static_cast<unsigned char>(wc))));
+    }
+    return out;
+}
+
+static bool containsBytes(const std::vector<BYTE>& haystack, const BYTE* needle, size_t needleLen) {
+    if (needleLen == 0 || haystack.size() < needleLen) return false;
+    auto it = std::search(haystack.begin(), haystack.end(), needle, needle + needleLen);
+    return it != haystack.end();
 }
 
 static bool syncIoctl(
@@ -251,7 +302,6 @@ public:
             return false;
         }
 
-        // Find free slot and plug in virtual Xbox 360 controller
         for (ULONG serial = 1; serial <= 128; ++serial) {
             VIGEM_PLUGIN_TARGET plugin{};
             plugin.Size = sizeof(plugin);
@@ -282,6 +332,8 @@ public:
 
             serialNo_ = serial;
             pluggedIn_ = true;
+            // Allow xusb22.sys a brief moment to queue its first Interrupt IN URB
+            Sleep(120);
             return true;
         }
 
@@ -359,6 +411,7 @@ struct HidGamepadCandidate {
     USHORT vendorId = 0;
     USHORT productId = 0;
     USHORT reportByteLength = 0;
+    bool isBluetooth = false;
     int score = 0;
 };
 
@@ -452,13 +505,15 @@ static std::vector<HidGamepadCandidate> enumerateHidGamepads() {
         std::wstring lowerProd = toLowerW(prod);
         std::wstring lowerMfg = toLowerW(mfg);
 
+        bool isBt = (lowerPath.find(L"00001124") != std::wstring::npos ||
+                     lowerPath.find(L"bthenum") != std::wstring::npos);
+
         int score = 0;
         if (lowerProd.find(L"pocketkeyboard") != std::wstring::npos ||
             lowerMfg.find(L"pocketkeyboard") != std::wstring::npos) {
             score += 100;
         }
-        if (lowerPath.find(L"bthenum") != std::wstring::npos ||
-            (hasAttrs && attrs.VendorID == 0x1D6B && attrs.ProductID == 0x0104)) {
+        if (isBt || (hasAttrs && attrs.VendorID == 0x1D6B && attrs.ProductID == 0x0104)) {
             score += 50;
         }
         if (caps.InputReportByteLength == 10 || caps.InputReportByteLength == 9) {
@@ -475,6 +530,7 @@ static std::vector<HidGamepadCandidate> enumerateHidGamepads() {
         cand.vendorId = hasAttrs ? attrs.VendorID : 0;
         cand.productId = hasAttrs ? attrs.ProductID : 0;
         cand.reportByteLength = caps.InputReportByteLength;
+        cand.isBluetooth = isBt;
         cand.score = score;
         candidates.push_back(std::move(cand));
     }
@@ -502,6 +558,40 @@ static SHORT scaleStickAxis(ULONG value, bool invertY) {
     }
 }
 
+static void applyButtonOneBased(int buttonIndex, XUSB_REPORT& out, bool& l2Digital, bool& r2Digital) {
+    switch (buttonIndex) {
+        case 1:  out.wButtons |= XUSB_GAMEPAD_X; break;              // Square / X
+        case 2:  out.wButtons |= XUSB_GAMEPAD_A; break;              // Cross / A
+        case 3:  out.wButtons |= XUSB_GAMEPAD_B; break;              // Circle / B
+        case 4:  out.wButtons |= XUSB_GAMEPAD_Y; break;              // Triangle / Y
+        case 5:  out.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER; break;  // L1 / LB
+        case 6:  out.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER; break; // R1 / RB
+        case 7:  l2Digital = true; break;                            // L2 / LT digital
+        case 8:  r2Digital = true; break;                            // R2 / RT digital
+        case 9:  out.wButtons |= XUSB_GAMEPAD_BACK; break;           // Create / View
+        case 10: out.wButtons |= XUSB_GAMEPAD_START; break;          // Options / Menu
+        case 11: out.wButtons |= XUSB_GAMEPAD_LEFT_THUMB; break;     // L3 / LS
+        case 12: out.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB; break;    // R3 / RS
+        case 13: out.wButtons |= XUSB_GAMEPAD_GUIDE; break;          // PS / Xbox
+        case 14: out.wButtons |= XUSB_GAMEPAD_BACK; break;           // Touchpad -> Back
+        default: break;
+    }
+}
+
+static void applyHatValue(ULONG hatVal, XUSB_REPORT& out) {
+    switch (hatVal) {
+        case 0: out.wButtons |= XUSB_GAMEPAD_DPAD_UP; break;
+        case 1: out.wButtons |= XUSB_GAMEPAD_DPAD_UP | XUSB_GAMEPAD_DPAD_RIGHT; break;
+        case 2: out.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT; break;
+        case 3: out.wButtons |= XUSB_GAMEPAD_DPAD_DOWN | XUSB_GAMEPAD_DPAD_RIGHT; break;
+        case 4: out.wButtons |= XUSB_GAMEPAD_DPAD_DOWN; break;
+        case 5: out.wButtons |= XUSB_GAMEPAD_DPAD_DOWN | XUSB_GAMEPAD_DPAD_LEFT; break;
+        case 6: out.wButtons |= XUSB_GAMEPAD_DPAD_LEFT; break;
+        case 7: out.wButtons |= XUSB_GAMEPAD_DPAD_UP | XUSB_GAMEPAD_DPAD_LEFT; break;
+        default: break;
+    }
+}
+
 static XUSB_REPORT parseHidToXusb(
     PHIDP_PREPARSED_DATA preparsed,
     BYTE* report,
@@ -525,23 +615,7 @@ static XUSB_REPORT parseHidToXusb(
             reportLen
         ) == HIDP_STATUS_SUCCESS) {
         for (ULONG i = 0; i < usageCount; ++i) {
-            switch (usages[i]) {
-                case 1:  out.wButtons |= XUSB_GAMEPAD_X; break;              // Square / X
-                case 2:  out.wButtons |= XUSB_GAMEPAD_A; break;              // Cross / A
-                case 3:  out.wButtons |= XUSB_GAMEPAD_B; break;              // Circle / B
-                case 4:  out.wButtons |= XUSB_GAMEPAD_Y; break;              // Triangle / Y
-                case 5:  out.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER; break;  // L1 / LB
-                case 6:  out.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER; break; // R1 / RB
-                case 7:  l2Digital = true; break;                            // L2 / LT digital
-                case 8:  r2Digital = true; break;                            // R2 / RT digital
-                case 9:  out.wButtons |= XUSB_GAMEPAD_BACK; break;           // Create / View
-                case 10: out.wButtons |= XUSB_GAMEPAD_START; break;          // Options / Menu
-                case 11: out.wButtons |= XUSB_GAMEPAD_LEFT_THUMB; break;     // L3 / LS
-                case 12: out.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB; break;    // R3 / RS
-                case 13: out.wButtons |= XUSB_GAMEPAD_GUIDE; break;          // PS / Xbox
-                case 14: out.wButtons |= XUSB_GAMEPAD_BACK; break;           // Touchpad -> Back
-                default: break;
-            }
+            applyButtonOneBased(static_cast<int>(usages[i]), out, l2Digital, r2Digital);
         }
     }
 
@@ -556,17 +630,7 @@ static XUSB_REPORT parseHidToXusb(
             reinterpret_cast<PCHAR>(report),
             reportLen
         ) == HIDP_STATUS_SUCCESS) {
-        switch (hatVal) {
-            case 0: out.wButtons |= XUSB_GAMEPAD_DPAD_UP; break;
-            case 1: out.wButtons |= XUSB_GAMEPAD_DPAD_UP | XUSB_GAMEPAD_DPAD_RIGHT; break;
-            case 2: out.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT; break;
-            case 3: out.wButtons |= XUSB_GAMEPAD_DPAD_DOWN | XUSB_GAMEPAD_DPAD_RIGHT; break;
-            case 4: out.wButtons |= XUSB_GAMEPAD_DPAD_DOWN; break;
-            case 5: out.wButtons |= XUSB_GAMEPAD_DPAD_DOWN | XUSB_GAMEPAD_DPAD_LEFT; break;
-            case 6: out.wButtons |= XUSB_GAMEPAD_DPAD_LEFT; break;
-            case 7: out.wButtons |= XUSB_GAMEPAD_DPAD_UP | XUSB_GAMEPAD_DPAD_LEFT; break;
-            default: break;
-        }
+        applyHatValue(hatVal, out);
     }
 
     ULONG axisVal = 128;
@@ -611,6 +675,472 @@ static XUSB_REPORT parseHidToXusb(
     return out;
 }
 
+// Parses raw 9-byte PocketKeyboard gamepad state (same byte layout as HidDescriptors.kt)
+static XUSB_REPORT parseRawGamepadToXusb(const BYTE payload[9]) {
+    XUSB_REPORT out{};
+    const uint16_t buttons = static_cast<uint16_t>(payload[0]) |
+                             (static_cast<uint16_t>(payload[1]) << 8);
+    bool l2Digital = false;
+    bool r2Digital = false;
+
+    for (int bit = 0; bit < 16; ++bit) {
+        if ((buttons & (1U << bit)) != 0) {
+            applyButtonOneBased(bit + 1, out, l2Digital, r2Digital);
+        }
+    }
+
+    applyHatValue(static_cast<ULONG>(payload[2] & 0x0F), out);
+
+    out.sThumbLX = scaleStickAxis(payload[3], false);
+    out.sThumbLY = scaleStickAxis(payload[4], true);
+    out.sThumbRX = scaleStickAxis(payload[5], false);
+    out.sThumbRY = scaleStickAxis(payload[6], true);
+
+    out.bLeftTrigger = payload[7];
+    if (l2Digital && out.bLeftTrigger == 0) {
+        out.bLeftTrigger = 255;
+    }
+
+    out.bRightTrigger = payload[8];
+    if (r2Digital && out.bRightTrigger == 0) {
+        out.bRightTrigger = 255;
+    }
+
+    return out;
+}
+
+static bool reportsEqual(const XUSB_REPORT& a, const XUSB_REPORT& b) {
+    return std::memcmp(&a, &b, sizeof(XUSB_REPORT)) == 0;
+}
+
+struct StaleBtHidCacheInfo {
+    std::string macAddress;
+    std::string deviceName;
+    DWORD sdpRecordBytes = 0;
+};
+
+static std::vector<StaleBtHidCacheInfo> detectStaleBluetoothHidCaches() {
+    std::vector<StaleBtHidCacheInfo> results;
+    static const BYTE kPocketKbdName[] = {
+        'P','o','c','k','e','t','K','e','y','b','o','a','r','d'
+    };
+    static const BYTE kGamepadUsageHeader[] = { 0x05, 0x01, 0x09, 0x05 };
+
+    HKEY hDevices = nullptr;
+    if (RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            L"SYSTEM\\CurrentControlSet\\Services\\BTHPORT\\Parameters\\Devices",
+            0,
+            KEY_READ,
+            &hDevices
+        ) != ERROR_SUCCESS) {
+        return results;
+    }
+
+    wchar_t subkeyName[128]{};
+    DWORD subkeyLen = 128;
+    for (DWORD i = 0;
+         RegEnumKeyExW(hDevices, i, subkeyName, &subkeyLen, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+         ++i, subkeyLen = 128) {
+        HKEY hDev = nullptr;
+        if (RegOpenKeyExW(hDevices, subkeyName, 0, KEY_READ, &hDev) != ERROR_SUCCESS) {
+            continue;
+        }
+
+        std::string devName;
+        BYTE nameBuf[256]{};
+        DWORD nameType = 0;
+        DWORD nameSize = sizeof(nameBuf);
+        if (RegQueryValueExW(hDev, L"Name", nullptr, &nameType, nameBuf, &nameSize) == ERROR_SUCCESS &&
+            nameSize > 0) {
+            size_t len = 0;
+            while (len < nameSize && nameBuf[len] != 0) ++len;
+            devName.assign(reinterpret_cast<const char*>(nameBuf), len);
+        }
+
+        HKEY hCached = nullptr;
+        if (RegOpenKeyExW(hDev, L"CachedServices", 0, KEY_READ, &hCached) == ERROR_SUCCESS) {
+            wchar_t valName[128]{};
+            DWORD valNameLen = 128;
+            DWORD valType = 0;
+            DWORD valSize = 0;
+
+            for (DWORD j = 0;
+                 RegEnumValueW(hCached, j, valName, &valNameLen, nullptr, &valType, nullptr, &valSize) == ERROR_SUCCESS;
+                 ++j, valNameLen = 128, valSize = 0) {
+                if (valType == REG_BINARY && valSize > 0 && valSize <= 8192) {
+                    std::vector<BYTE> sdpBuf(valSize);
+                    DWORD readSize = valSize;
+                    if (RegQueryValueExW(hCached, valName, nullptr, nullptr, sdpBuf.data(), &readSize) == ERROR_SUCCESS) {
+                        sdpBuf.resize(readSize);
+                        if (containsBytes(sdpBuf, kPocketKbdName, sizeof(kPocketKbdName)) &&
+                            !containsBytes(sdpBuf, kGamepadUsageHeader, sizeof(kGamepadUsageHeader))) {
+                            StaleBtHidCacheInfo info;
+                            info.macAddress = formatMacString(subkeyName);
+                            info.deviceName = devName.empty() ? info.macAddress : devName;
+                            info.sdpRecordBytes = readSize;
+                            results.push_back(std::move(info));
+                            break;
+                        }
+                    }
+                }
+            }
+            RegCloseKey(hCached);
+        }
+
+        RegCloseKey(hDev);
+    }
+
+    RegCloseKey(hDevices);
+    return results;
+}
+
+struct BluetoothBridgeCandidate {
+    BTH_ADDR address = 0;
+    std::wstring name;
+    ULONG classOfDevice = 0;
+    bool isConnected = false;
+    bool isPhone = false;
+};
+
+static std::vector<BluetoothBridgeCandidate> enumerateBluetoothBridgeDevices() {
+    std::vector<BluetoothBridgeCandidate> candidates;
+
+    BLUETOOTH_DEVICE_SEARCH_PARAMS params{};
+    params.dwSize = sizeof(params);
+    params.fReturnAuthenticated = TRUE;
+    params.fReturnRemembered = TRUE;
+    params.fReturnConnected = TRUE;
+    params.fReturnUnknown = FALSE;
+    params.fIssueInquiry = FALSE;
+    params.cTimeoutMultiplier = 0;
+
+    BLUETOOTH_DEVICE_INFO info{};
+    info.dwSize = sizeof(info);
+
+    HBLUETOOTH_DEVICE_FIND hFind = BluetoothFindFirstDevice(&params, &info);
+    if (!hFind) {
+        return candidates;
+    }
+
+    do {
+        const ULONG majorClass = (info.ulClassofDevice & 0x1F00);
+        // Skip Audio/Video devices (earbuds, headphones, speakers) and unauthenticated junk
+        if ((info.fAuthenticated || info.fConnected) &&
+            info.Address.ullLong != 0 &&
+            majorClass != 0x0400) {
+            BluetoothBridgeCandidate cand;
+            cand.address = info.Address.ullLong;
+            cand.name = info.szName[0] ? std::wstring(info.szName) : L"(Bluetooth Device)";
+            cand.classOfDevice = info.ulClassofDevice;
+            cand.isConnected = (info.fConnected == TRUE);
+            cand.isPhone = (majorClass == 0x0200);
+            candidates.push_back(std::move(cand));
+        }
+        std::memset(&info, 0, sizeof(info));
+        info.dwSize = sizeof(info);
+    } while (BluetoothFindNextDevice(hFind, &info));
+
+    BluetoothFindDeviceClose(hFind);
+
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+        if (a.isConnected != b.isConnected) return a.isConnected > b.isConnected;
+        if (a.isPhone != b.isPhone) return a.isPhone > b.isPhone;
+        return a.name < b.name;
+    });
+    return candidates;
+}
+
+static SOCKET tryConnectBluetoothRfcomm(BTH_ADDR addr, DWORD timeoutMs) {
+    SOCKET sock = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
+    if (sock == INVALID_SOCKET) {
+        return INVALID_SOCKET;
+    }
+
+    u_long nonBlocking = 1;
+    if (ioctlsocket(sock, FIONBIO, &nonBlocking) != 0) {
+        closesocket(sock);
+        return INVALID_SOCKET;
+    }
+
+    SOCKADDR_BTH sa{};
+    sa.addressFamily = AF_BTH;
+    sa.btAddr = addr;
+    sa.serviceClassId = GUID_POCKETPAD_RFCOMM_BRIDGE;
+    sa.port = BT_PORT_ANY;
+
+    int res = connect(sock, reinterpret_cast<SOCKADDR*>(&sa), sizeof(sa));
+    if (res == 0) {
+        nonBlocking = 0;
+        ioctlsocket(sock, FIONBIO, &nonBlocking);
+        return sock;
+    }
+
+    int err = WSAGetLastError();
+    if (err != WSAEWOULDBLOCK) {
+        closesocket(sock);
+        return INVALID_SOCKET;
+    }
+
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    while (g_running.load()) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline) {
+            break;
+        }
+        DWORD remaining = static_cast<DWORD>(deadline - now);
+        DWORD sliceMs = std::min<DWORD>(remaining, 150);
+
+        fd_set writeSet;
+        fd_set exceptSet;
+        FD_ZERO(&writeSet);
+        FD_ZERO(&exceptSet);
+        FD_SET(sock, &writeSet);
+        FD_SET(sock, &exceptSet);
+
+        timeval tv{};
+        tv.tv_sec = static_cast<long>(sliceMs / 1000);
+        tv.tv_usec = static_cast<long>((sliceMs % 1000) * 1000);
+
+        int sel = select(0, nullptr, &writeSet, &exceptSet, &tv);
+        if (sel > 0) {
+            int soErr = 0;
+            int optLen = sizeof(soErr);
+            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soErr), &optLen) != 0) {
+                soErr = WSAECONNREFUSED;
+            }
+            if (FD_ISSET(sock, &writeSet) && soErr == 0) {
+                nonBlocking = 0;
+                ioctlsocket(sock, FIONBIO, &nonBlocking);
+                return sock;
+            }
+            closesocket(sock);
+            return INVALID_SOCKET;
+        }
+        if (sel == SOCKET_ERROR) {
+            closesocket(sock);
+            return INVALID_SOCKET;
+        }
+    }
+
+    closesocket(sock);
+    return INVALID_SOCKET;
+}
+
+static void runHidSession(const HidGamepadCandidate& target, bool& waitingMessagePrinted) {
+    HANDLE hidHandle = CreateFileW(
+        target.path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OVERLAPPED,
+        nullptr
+    );
+    if (hidHandle == INVALID_HANDLE_VALUE) {
+        Sleep(400);
+        return;
+    }
+
+    HidD_SetNumInputBuffers(hidHandle, 64);
+
+    PHIDP_PREPARSED_DATA preparsed = nullptr;
+    HIDP_CAPS caps{};
+    if (!HidD_GetPreparsedData(hidHandle, &preparsed) || !preparsed ||
+        HidP_GetCaps(preparsed, &caps) != HIDP_STATUS_SUCCESS) {
+        if (preparsed) HidD_FreePreparsedData(preparsed);
+        CloseHandle(hidHandle);
+        Sleep(400);
+        return;
+    }
+
+    ViGEmXbox360 vigem;
+    std::string err;
+    if (!vigem.connect(err)) {
+        std::fprintf(stderr, "[ERROR] %s\n", err.c_str());
+        HidD_FreePreparsedData(preparsed);
+        CloseHandle(hidHandle);
+        for (int i = 0; i < 20 && g_running.load(); ++i) {
+            Sleep(100);
+        }
+        return;
+    }
+
+    waitingMessagePrinted = false;
+    std::printf(
+        "[Connected] %s HID \"%ls\" (VID=%04X PID=%04X) -> Virtual Xbox 360 Controller #%lu ACTIVE!\n",
+        target.isBluetooth ? "Bluetooth" : "USB",
+        target.productName.empty() ? L"Gamepad" : target.productName.c_str(),
+        target.vendorId,
+        target.productId,
+        vigem.serialNo()
+    );
+    std::fflush(stdout);
+
+    HANDLE readEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::vector<BYTE> reportBuf(caps.InputReportByteLength);
+    XUSB_REPORT lastReport{};
+    bool hasLastReport = false;
+
+    while (g_running.load()) {
+        OVERLAPPED ol{};
+        ol.hEvent = readEvent;
+        ResetEvent(readEvent);
+
+        DWORD bytesRead = 0;
+        BOOL ok = ReadFile(
+            hidHandle,
+            reportBuf.data(),
+            static_cast<DWORD>(reportBuf.size()),
+            &bytesRead,
+            &ol
+        );
+
+        if (!ok) {
+            DWORD readErr = GetLastError();
+            if (readErr != ERROR_IO_PENDING) {
+                break;
+            }
+
+            bool completed = false;
+            while (g_running.load()) {
+                DWORD waitRes = WaitForSingleObject(readEvent, 250);
+                if (waitRes == WAIT_OBJECT_0) {
+                    completed = (GetOverlappedResult(hidHandle, &ol, &bytesRead, FALSE) == TRUE);
+                    break;
+                }
+                if (waitRes != WAIT_TIMEOUT) {
+                    completed = false;
+                    break;
+                }
+            }
+
+            if (!g_running.load()) {
+                CancelIoEx(hidHandle, &ol);
+                break;
+            }
+            if (!completed) {
+                break;
+            }
+        }
+
+        if (bytesRead > 0) {
+            XUSB_REPORT xusb = parseHidToXusb(preparsed, reportBuf.data(), bytesRead);
+            if (!hasLastReport || !reportsEqual(xusb, lastReport)) {
+                DWORD submitErr = ERROR_SUCCESS;
+                if (vigem.submitReport(xusb, &submitErr) && submitErr == ERROR_SUCCESS) {
+                    lastReport = xusb;
+                    hasLastReport = true;
+                }
+            }
+        }
+    }
+
+    if (readEvent) CloseHandle(readEvent);
+    HidD_FreePreparsedData(preparsed);
+    CloseHandle(hidHandle);
+    vigem.disconnect();
+
+    if (g_running.load()) {
+        std::printf("[Disconnected] HID gamepad disconnected. Waiting for reconnect...\n");
+        std::fflush(stdout);
+        waitingMessagePrinted = true;
+    }
+}
+
+static void runRfcommBridgeSession(
+    SOCKET sock,
+    const BluetoothBridgeCandidate& dev,
+    bool& waitingMessagePrinted
+) {
+    ViGEmXbox360 vigem;
+    std::string err;
+    if (!vigem.connect(err)) {
+        std::fprintf(stderr, "[ERROR] %s\n", err.c_str());
+        closesocket(sock);
+        for (int i = 0; i < 20 && g_running.load(); ++i) {
+            Sleep(100);
+        }
+        return;
+    }
+
+    waitingMessagePrinted = false;
+    std::printf(
+        "[Connected] Bluetooth Direct Bridge -> \"%ls\" (%s) -> Virtual Xbox 360 Controller #%lu ACTIVE!\n",
+        dev.name.c_str(),
+        formatBthAddr(dev.address).c_str(),
+        vigem.serialNo()
+    );
+    std::fflush(stdout);
+
+    std::vector<BYTE> streamBuf;
+    streamBuf.reserve(256);
+    BYTE recvTmp[256]{};
+    XUSB_REPORT lastReport{};
+    bool hasLastReport = false;
+
+    while (g_running.load()) {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(sock, &readSet);
+
+        timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = 250000;
+
+        int sel = select(0, &readSet, nullptr, nullptr, &tv);
+        if (sel == SOCKET_ERROR) {
+            break;
+        }
+        if (sel == 0) {
+            continue;
+        }
+
+        int n = recv(sock, reinterpret_cast<char*>(recvTmp), sizeof(recvTmp), 0);
+        if (n <= 0) {
+            break;
+        }
+        streamBuf.insert(streamBuf.end(), recvTmp, recvTmp + n);
+
+        while (streamBuf.size() >= BRIDGE_FRAME_SIZE) {
+            if (streamBuf[0] != BRIDGE_FRAME_HEADER_0 || streamBuf[1] != BRIDGE_FRAME_HEADER_1) {
+                auto it = std::find(streamBuf.begin() + 1, streamBuf.end(), BRIDGE_FRAME_HEADER_0);
+                streamBuf.erase(streamBuf.begin(), it);
+                continue;
+            }
+
+            BYTE checksum = 0;
+            for (size_t i = 2; i <= 10; ++i) {
+                checksum ^= streamBuf[i];
+            }
+            if (checksum != streamBuf[11]) {
+                streamBuf.erase(streamBuf.begin());
+                continue;
+            }
+
+            XUSB_REPORT xusb = parseRawGamepadToXusb(&streamBuf[2]);
+            if (!hasLastReport || !reportsEqual(xusb, lastReport)) {
+                DWORD submitErr = ERROR_SUCCESS;
+                if (vigem.submitReport(xusb, &submitErr) && submitErr == ERROR_SUCCESS) {
+                    lastReport = xusb;
+                    hasLastReport = true;
+                }
+            }
+
+            streamBuf.erase(streamBuf.begin(), streamBuf.begin() + BRIDGE_FRAME_SIZE);
+        }
+    }
+
+    closesocket(sock);
+    vigem.disconnect();
+
+    if (g_running.load()) {
+        std::printf("[Disconnected] Bluetooth Direct Bridge closed. Waiting for reconnect...\n");
+        std::fflush(stdout);
+        waitingMessagePrinted = true;
+    }
+}
+
 static int runSelfTest() {
     std::printf("[PocketPadXboxBridge] Testing ViGEmBus connection...\n");
     ViGEmXbox360 vigem;
@@ -620,7 +1150,6 @@ static int runSelfTest() {
         return 1;
     }
     std::printf("[OK] Virtual Xbox 360 Controller plugged in (Serial #%lu).\n", vigem.serialNo());
-    Sleep(200);
 
     XUSB_REPORT rep{};
     DWORD repErr = 0;
@@ -647,184 +1176,146 @@ static int listGamepads() {
     auto list = enumerateHidGamepads();
     if (list.empty()) {
         std::printf("No non-ViGEm HID Gamepad devices currently connected.\n");
-        return 0;
+    } else {
+        std::printf("Detected HID Gamepad devices (%zu):\n", list.size());
+        for (size_t i = 0; i < list.size(); ++i) {
+            const auto& c = list[i];
+            std::printf(
+                "  [%zu] Type=%s Score=%d VID=%04X PID=%04X ReportLen=%u Product=\"%ls\" Mfg=\"%ls\"\n",
+                i,
+                c.isBluetooth ? "Bluetooth-HID" : "USB-HID",
+                c.score,
+                c.vendorId,
+                c.productId,
+                c.reportByteLength,
+                c.productName.empty() ? L"(none)" : c.productName.c_str(),
+                c.manufacturer.empty() ? L"(none)" : c.manufacturer.c_str()
+            );
+        }
     }
-    std::printf("Detected HID Gamepad devices (%zu):\n", list.size());
-    for (size_t i = 0; i < list.size(); ++i) {
-        const auto& c = list[i];
+
+    auto btDevs = enumerateBluetoothBridgeDevices();
+    std::printf("\nPaired Bluetooth Direct Bridge candidates (%zu):\n", btDevs.size());
+    for (size_t i = 0; i < btDevs.size(); ++i) {
+        const auto& d = btDevs[i];
         std::printf(
-            "  [%zu] Score=%d VID=%04X PID=%04X ReportLen=%u Product=\"%ls\" Mfg=\"%ls\"\n",
+            "  [%zu] %s Name=\"%ls\" Connected=%s Phone=%s\n",
             i,
-            c.score,
-            c.vendorId,
-            c.productId,
-            c.reportByteLength,
-            c.productName.empty() ? L"(none)" : c.productName.c_str(),
-            c.manufacturer.empty() ? L"(none)" : c.manufacturer.c_str()
+            formatBthAddr(d.address).c_str(),
+            d.name.c_str(),
+            d.isConnected ? "yes" : "no",
+            d.isPhone ? "yes" : "no"
         );
     }
+
+    auto staleCaches = detectStaleBluetoothHidCaches();
+    if (!staleCaches.empty()) {
+        std::printf("\n[Notice] Stale Windows Bluetooth HID SDP Cache detected:\n");
+        for (const auto& s : staleCaches) {
+            std::printf(
+                "  - \"%s\" (%s): cached %lu-byte Keyboard+Mouse descriptor (missing Gamepad Col03).\n"
+                "    Direct Bridge connects without unpairing. For native BT HID too: forget & re-pair once in Windows Settings.\n",
+                s.deviceName.c_str(),
+                s.macAddress.c_str(),
+                s.sdpRecordBytes
+            );
+        }
+    }
+
     return 0;
 }
 
-static bool reportsEqual(const XUSB_REPORT& a, const XUSB_REPORT& b) {
-    return std::memcmp(&a, &b, sizeof(XUSB_REPORT)) == 0;
-}
-
 int main(int argc, char** argv) {
+    WSADATA wsaData{};
+    bool wsaInitialized = (WSAStartup(MAKEWORD(2, 2), &wsaData) == 0);
+
     if (argc > 1) {
         std::string arg(argv[1]);
         if (arg == "--test") {
-            return runSelfTest();
+            int rc = runSelfTest();
+            if (wsaInitialized) WSACleanup();
+            return rc;
         }
         if (arg == "--list") {
-            return listGamepads();
+            int rc = listGamepads();
+            if (wsaInitialized) WSACleanup();
+            return rc;
         }
     }
 
     SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
 
-    std::printf("============================================================\n");
+    std::printf("==================================================================\n");
     std::printf("  PocketKeyboard -> Xbox 360 (XInput) Bridge via ViGEmBus\n");
-    std::printf("  Keep this window open while playing PC games.\n");
-    std::printf("  Press Ctrl+C to stop and unplug the virtual controller.\n");
-    std::printf("============================================================\n\n");
+    std::printf("  Supports: USB HID + Bluetooth HID + Bluetooth Direct Bridge\n");
+    std::printf("  Keep this window open while playing PC games (Ctrl+C to quit).\n");
+    std::printf("==================================================================\n\n");
+
+    auto staleCaches = detectStaleBluetoothHidCaches();
+    for (const auto& s : staleCaches) {
+        std::printf(
+            "[Note] \"%s\" (%s) still has Windows' old Keyboard+Mouse BT HID cache (%lu B).\n"
+            "       Direct Bluetooth Bridge bypasses this cache automatically!\n\n",
+            s.deviceName.c_str(),
+            s.macAddress.c_str(),
+            s.sdpRecordBytes
+        );
+    }
 
     bool waitingMessagePrinted = false;
+    int probeCycle = 0;
 
     while (g_running.load()) {
-        auto candidates = enumerateHidGamepads();
-        if (candidates.empty()) {
-            if (!waitingMessagePrinted) {
-                std::printf("[Waiting] Connect your phone via Bluetooth (or USB) to PocketKeyboard...\n");
-                std::fflush(stdout);
-                waitingMessagePrinted = true;
+        auto hidCandidates = enumerateHidGamepads();
+        if (!hidCandidates.empty()) {
+            runHidSession(hidCandidates.front(), waitingMessagePrinted);
+            probeCycle = 0;
+            continue;
+        }
+
+        if (wsaInitialized) {
+            auto btDevs = enumerateBluetoothBridgeDevices();
+            bool connectedViaBtBridge = false;
+            const bool probeDisconnectedPhones = ((probeCycle % 4) == 0);
+
+            for (const auto& dev : btDevs) {
+                if (!g_running.load()) break;
+                if (!dev.isConnected && !(probeDisconnectedPhones && dev.isPhone)) {
+                    continue;
+                }
+
+                SOCKET sock = tryConnectBluetoothRfcomm(dev.address, dev.isConnected ? 900 : 1800);
+                if (sock != INVALID_SOCKET) {
+                    runRfcommBridgeSession(sock, dev, waitingMessagePrinted);
+                    connectedViaBtBridge = true;
+                    probeCycle = 0;
+                    break;
+                }
             }
-            for (int i = 0; i < 10 && g_running.load(); ++i) {
-                Sleep(100);
+
+            if (connectedViaBtBridge) {
+                continue;
             }
-            continue;
         }
 
-        const auto& target = candidates.front();
-        HANDLE hidHandle = CreateFileW(
-            target.path.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_FLAG_OVERLAPPED,
-            nullptr
-        );
-        if (hidHandle == INVALID_HANDLE_VALUE) {
-            Sleep(500);
-            continue;
-        }
-
-        HidD_SetNumInputBuffers(hidHandle, 64);
-
-        PHIDP_PREPARSED_DATA preparsed = nullptr;
-        HIDP_CAPS caps{};
-        if (!HidD_GetPreparsedData(hidHandle, &preparsed) || !preparsed ||
-            HidP_GetCaps(preparsed, &caps) != HIDP_STATUS_SUCCESS) {
-            if (preparsed) HidD_FreePreparsedData(preparsed);
-            CloseHandle(hidHandle);
-            Sleep(500);
-            continue;
-        }
-
-        ViGEmXbox360 vigem;
-        std::string err;
-        if (!vigem.connect(err)) {
-            std::fprintf(stderr, "[ERROR] %s\n", err.c_str());
-            HidD_FreePreparsedData(preparsed);
-            CloseHandle(hidHandle);
-            for (int i = 0; i < 20 && g_running.load(); ++i) {
-                Sleep(100);
-            }
-            continue;
-        }
-
-        waitingMessagePrinted = false;
-        std::printf(
-            "[Connected] Reading \"%ls\" (VID=%04X PID=%04X) -> Virtual Xbox 360 Controller #%lu ACTIVE!\n",
-            target.productName.empty() ? L"Bluetooth HID Gamepad" : target.productName.c_str(),
-            target.vendorId,
-            target.productId,
-            vigem.serialNo()
-        );
-        std::fflush(stdout);
-
-        HANDLE readEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        std::vector<BYTE> reportBuf(caps.InputReportByteLength);
-        XUSB_REPORT lastReport{};
-        bool hasLastReport = false;
-
-        while (g_running.load()) {
-            OVERLAPPED ol{};
-            ol.hEvent = readEvent;
-            ResetEvent(readEvent);
-
-            DWORD bytesRead = 0;
-            BOOL ok = ReadFile(
-                hidHandle,
-                reportBuf.data(),
-                static_cast<DWORD>(reportBuf.size()),
-                &bytesRead,
-                &ol
+        if (!waitingMessagePrinted) {
+            std::printf(
+                "[Waiting] Open PocketKeyboard on your paired phone (Bluetooth mode)\n"
+                "          or connect via USB HID to activate Xbox 360 Controller...\n"
             );
-
-            if (!ok) {
-                DWORD readErr = GetLastError();
-                if (readErr != ERROR_IO_PENDING) {
-                    break;
-                }
-
-                bool completed = false;
-                while (g_running.load()) {
-                    DWORD waitRes = WaitForSingleObject(readEvent, 250);
-                    if (waitRes == WAIT_OBJECT_0) {
-                        completed = (GetOverlappedResult(hidHandle, &ol, &bytesRead, FALSE) == TRUE);
-                        break;
-                    }
-                    if (waitRes != WAIT_TIMEOUT) {
-                        completed = false;
-                        break;
-                    }
-                }
-
-                if (!g_running.load()) {
-                    CancelIoEx(hidHandle, &ol);
-                    break;
-                }
-                if (!completed) {
-                    break;
-                }
-            }
-
-            if (bytesRead > 0) {
-                XUSB_REPORT xusb = parseHidToXusb(preparsed, reportBuf.data(), bytesRead);
-                if (!hasLastReport || !reportsEqual(xusb, lastReport)) {
-                    DWORD submitErr = ERROR_SUCCESS;
-                    if (vigem.submitReport(xusb, &submitErr) && submitErr == ERROR_SUCCESS) {
-                        lastReport = xusb;
-                        hasLastReport = true;
-                    }
-                }
-            }
-        }
-
-        if (readEvent) CloseHandle(readEvent);
-        HidD_FreePreparsedData(preparsed);
-        CloseHandle(hidHandle);
-        vigem.disconnect();
-
-        if (g_running.load()) {
-            std::printf("[Disconnected] Phone gamepad disconnected. Waiting for reconnect...\n");
             std::fflush(stdout);
             waitingMessagePrinted = true;
         }
+
+        ++probeCycle;
+        for (int i = 0; i < 10 && g_running.load(); ++i) {
+            Sleep(100);
+        }
     }
 
+    if (wsaInitialized) {
+        WSACleanup();
+    }
     std::printf("\n[Stopped] Virtual Xbox 360 Controller unplugged cleanly.\n");
     return 0;
 }

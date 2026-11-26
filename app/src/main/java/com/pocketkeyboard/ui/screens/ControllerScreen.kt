@@ -97,6 +97,7 @@ fun ControllerScreen(
     hidArmed: Boolean,
     gamepadAvailable: Boolean,
     transportMode: TransportMode,
+    bluetoothBridgeHost: String? = null,
     controllerStyle: ControllerStyle,
     onToggleControllerStyle: (ControllerStyle) -> Unit,
     onButtonChange: (Int, Boolean) -> Unit,
@@ -108,7 +109,7 @@ fun ControllerScreen(
     modifier: Modifier = Modifier
 ) {
     val isPortrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
-    val enabled = hidArmed && gamepadAvailable
+    val enabled = gamepadAvailable
     val isXbox = controllerStyle == ControllerStyle.XBOX
     val accentColor = if (isXbox) XboxGreen else DualSenseBlue
 
@@ -134,9 +135,9 @@ fun ControllerScreen(
             ) {
                 Text(
                     text = when {
-                        !hidArmed && transportMode == TransportMode.BLUETOOTH ->
-                            "Bluetooth HID is not connected. Connect to a host in the Connect tab to use the Gamepad."
-                        !hidArmed ->
+                        transportMode == TransportMode.BLUETOOTH && bluetoothBridgeHost == null ->
+                            "Not connected. Connect in the Connect tab, or run PocketPadXboxBridge.exe on your Windows PC over Bluetooth."
+                        !hidArmed && transportMode == TransportMode.USB_ROOT ->
                             "USB HID is DISARMED. Arm it in the Connect tab to use the Gamepad."
                         else ->
                             "Gamepad HID interface (/dev/hidg2) was not exposed by this kernel. Use Bluetooth mode for Gamepad."

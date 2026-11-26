@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.UsbOff
 import androidx.compose.material.icons.filled.Visibility
@@ -70,6 +71,7 @@ import com.pocketkeyboard.viewmodel.TransportMode
 fun StatusCard(
     transportMode: TransportMode,
     bluetoothSnapshot: BluetoothHidSnapshot,
+    bluetoothBridgeHost: String?,
     rootAvailable: Boolean,
     gadgetEnvironment: GadgetEnvironment?,
     hidArmed: Boolean,
@@ -114,6 +116,7 @@ fun StatusCard(
             TransportMode.BLUETOOTH -> {
                 BluetoothStatusSection(
                     snapshot = bluetoothSnapshot,
+                    bluetoothBridgeHost = bluetoothBridgeHost,
                     errorMessage = errorMessage,
                     isLoading = isLoading,
                     onToggleBluetoothHid = onToggleBluetoothHid,
@@ -275,7 +278,7 @@ fun StatusCard(
                     style = MaterialTheme.typography.titleMedium
                 )
                 Text(
-                    text = "Choose button labels on the Gamepad tab. Use PocketPadXboxBridge.exe on Windows for full XInput game support.",
+                    text = "Choose button labels on the Gamepad tab. Run PocketPadXboxBridge.exe on Windows to connect wirelessly via Bluetooth Direct Bridge (works even with old pairings) or USB/BT HID for Xbox 360 (XInput) support.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -424,6 +427,7 @@ private fun TransportOptionPill(
 @Composable
 private fun BluetoothStatusSection(
     snapshot: BluetoothHidSnapshot,
+    bluetoothBridgeHost: String?,
     errorMessage: String?,
     isLoading: Boolean,
     onToggleBluetoothHid: (Boolean) -> Unit,
@@ -436,14 +440,17 @@ private fun BluetoothStatusSection(
     onOpenBluetoothSettings: () -> Unit
 ) {
     val cardColor by animateColorAsState(
-        targetValue = when (snapshot.state) {
-            BluetoothHidState.CONNECTED -> MaterialTheme.colorScheme.primaryContainer
-            BluetoothHidState.READY,
-            BluetoothHidState.CONNECTING,
-            BluetoothHidState.REGISTERING -> MaterialTheme.colorScheme.secondaryContainer
-            BluetoothHidState.ERROR,
-            BluetoothHidState.UNSUPPORTED,
-            BluetoothHidState.NO_ADAPTER -> MaterialTheme.colorScheme.errorContainer
+        targetValue = when {
+            snapshot.state == BluetoothHidState.CONNECTED || bluetoothBridgeHost != null ->
+                MaterialTheme.colorScheme.primaryContainer
+            snapshot.state == BluetoothHidState.READY ||
+                snapshot.state == BluetoothHidState.CONNECTING ||
+                snapshot.state == BluetoothHidState.REGISTERING ->
+                MaterialTheme.colorScheme.secondaryContainer
+            snapshot.state == BluetoothHidState.ERROR ||
+                snapshot.state == BluetoothHidState.UNSUPPORTED ||
+                snapshot.state == BluetoothHidState.NO_ADAPTER ->
+                MaterialTheme.colorScheme.errorContainer
             else -> MaterialTheme.colorScheme.surfaceVariant
         },
         label = "btCardColor"
@@ -506,18 +513,20 @@ private fun BluetoothStatusSection(
                             style = MaterialTheme.typography.titleLarge
                         )
                         Text(
-                            text = when (snapshot.state) {
-                                BluetoothHidState.CONNECTED ->
+                            text = when {
+                                snapshot.state == BluetoothHidState.CONNECTED ->
                                     "Connected to ${snapshot.connectedDeviceName ?: "Host"}"
-                                BluetoothHidState.CONNECTING -> "Connecting to host..."
-                                BluetoothHidState.READY -> "Ready — waiting for host"
-                                BluetoothHidState.REGISTERING -> "Starting Bluetooth HID..."
-                                BluetoothHidState.BLUETOOTH_OFF -> "Bluetooth is turned off"
-                                BluetoothHidState.PERMISSION_REQUIRED -> "Bluetooth permission needed"
-                                BluetoothHidState.NO_ADAPTER -> "No Bluetooth adapter found"
-                                BluetoothHidState.UNSUPPORTED -> "Requires Android 9 or higher"
-                                BluetoothHidState.ERROR -> "Bluetooth HID Error"
-                                BluetoothHidState.IDLE -> "Bluetooth HID Inactive"
+                                bluetoothBridgeHost != null ->
+                                    "Gamepad Bridge active ($bluetoothBridgeHost)"
+                                snapshot.state == BluetoothHidState.CONNECTING -> "Connecting to host..."
+                                snapshot.state == BluetoothHidState.READY -> "Ready — waiting for host"
+                                snapshot.state == BluetoothHidState.REGISTERING -> "Starting Bluetooth HID..."
+                                snapshot.state == BluetoothHidState.BLUETOOTH_OFF -> "Bluetooth is turned off"
+                                snapshot.state == BluetoothHidState.PERMISSION_REQUIRED -> "Bluetooth permission needed"
+                                snapshot.state == BluetoothHidState.NO_ADAPTER -> "No Bluetooth adapter found"
+                                snapshot.state == BluetoothHidState.UNSUPPORTED -> "Requires Android 9 or higher"
+                                snapshot.state == BluetoothHidState.ERROR -> "Bluetooth HID Error"
+                                else -> "Bluetooth HID Inactive"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -606,6 +615,24 @@ private fun BluetoothStatusSection(
                 }
             }
 
+            if (bluetoothBridgeHost != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.SportsEsports,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = ArmedGreen
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Xbox Gamepad Bridge: $bluetoothBridgeHost",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ArmedGreen
+                    )
+                }
+            }
+
             if (snapshot.state == BluetoothHidState.PERMISSION_REQUIRED) {
                 Spacer(modifier = Modifier.height(12.dp))
                 Button(
@@ -669,7 +696,7 @@ private fun BluetoothStatusSection(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "To pair a new PC, laptop, TV, or tablet: tap Make Discoverable, then select this phone from your host's Bluetooth settings.\nIf you already paired this phone before adding Gamepad, remove it in your PC's Bluetooth settings and re-pair once. For Windows XInput PC games, run PocketPadXboxBridge.exe on your PC.",
+                    text = "To pair a new PC, laptop, TV, or tablet: tap Make Discoverable, then select this phone from your host's Bluetooth settings.\nFor Windows PC games (Xbox 360 / XInput), run PocketPadXboxBridge.exe — it auto-connects via Bluetooth Direct Bridge (no unpairing needed). If you also want native Bluetooth HID Gamepad in testers without the bridge, forget & re-pair your phone once.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

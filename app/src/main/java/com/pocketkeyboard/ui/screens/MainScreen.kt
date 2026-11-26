@@ -79,6 +79,7 @@ fun MainScreen(
 ) {
     val transportMode by viewModel.transportMode.collectAsState()
     val bluetoothSnapshot by viewModel.bluetoothSnapshot.collectAsState()
+    val bluetoothBridgeHost by viewModel.bluetoothBridgeHost.collectAsState()
     val rootAvailable by viewModel.rootAvailable.collectAsState()
     val gadgetEnvironment by viewModel.gadgetEnvironment.collectAsState()
     val hidArmed by viewModel.hidArmed.collectAsState()
@@ -193,10 +194,12 @@ fun MainScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 AppPage.entries.forEach { page ->
+                    val btAnyConnected = transportMode == TransportMode.BLUETOOTH &&
+                        (hidArmed || bluetoothBridgeHost != null)
+                    val connectActive = hidArmed || btAnyConnected
                     val icon = when (page) {
                         AppPage.CONNECT -> when {
-                            transportMode == TransportMode.BLUETOOTH && hidArmed ->
-                                Icons.Filled.BluetoothConnected
+                            btAnyConnected -> Icons.Filled.BluetoothConnected
                             transportMode == TransportMode.BLUETOOTH ->
                                 Icons.Filled.Bluetooth
                             else -> Icons.Filled.Usb
@@ -223,7 +226,7 @@ fun MainScreen(
                                 imageVector = icon,
                                 contentDescription = null,
                                 modifier = Modifier.size(18.dp),
-                                tint = if (page == AppPage.CONNECT && hidArmed) {
+                                tint = if (page == AppPage.CONNECT && connectActive) {
                                     ArmedGreen
                                 } else {
                                     MaterialTheme.colorScheme.onSurface
@@ -239,6 +242,7 @@ fun MainScreen(
                     StatusCard(
                         transportMode = transportMode,
                         bluetoothSnapshot = bluetoothSnapshot,
+                        bluetoothBridgeHost = bluetoothBridgeHost,
                         rootAvailable = rootAvailable,
                         gadgetEnvironment = gadgetEnvironment,
                         hidArmed = hidArmed,
@@ -383,6 +387,7 @@ fun MainScreen(
                         hidArmed = hidArmed,
                         gamepadAvailable = gamepadAvailable,
                         transportMode = transportMode,
+                        bluetoothBridgeHost = bluetoothBridgeHost,
                         controllerStyle = controllerStyle,
                         onToggleControllerStyle = viewModel::setControllerStyle,
                         onButtonChange = viewModel::setGamepadButton,

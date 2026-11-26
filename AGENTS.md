@@ -35,12 +35,14 @@ Output APK: `app/build/outputs/apk/debug/app-debug.apk`.
   - **Descriptor Invariant:** Unsigned 8-bit axis maxima (`255`) MUST use 2-byte `0x26, 0xFF, 0x00` (never `0x25, 0xFF`, which is signed `-1`), and HID `Unit` / `Physical Maximum` MUST be reset after the Hat Switch.
 - **`BluetoothHidManager.kt`** (`@RequiresApi(Build.VERSION_CODES.P)`):
   - Uses `(context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter` (never deprecated `BluetoothAdapter.getDefaultAdapter()`).
-  - Registers with low-latency `BluetoothHidDeviceAppQosSettings` (`SERVICE_BEST_EFFORT`, `11250`us latency) and automatically falls back to `null` QoS if an OEM stack rejects it synchronously or asynchronously.
+  - Registers with low-latency `BluetoothHidDeviceAppQosSettings` (`SERVICE_BEST_EFFORT`, `tokenRate = 2400`, `tokenBucketSize = 64`, `latency = 11250`us) so 10+ byte Bluetooth HID Gamepad packets fit cleanly, and automatically falls back to `null` QoS if an OEM stack rejects it synchronously or asynchronously.
   - Caches permission status in `@Volatile private var hasPermissionsCached` so hot `sendKeyboardReport` / `sendMouseReport` / `sendGamepadReport` calls perform zero Binder IPC.
   - Registers a `BroadcastReceiver` for `ACTION_STATE_CHANGED` and `ACTION_BOND_STATE_CHANGED` using `ContextCompat.registerReceiver(..., ContextCompat.RECEIVER_EXPORTED)` — **required** for Android 14 (`targetSdk = 34`) safety.
-  - Implements `BluetoothHidDevice.Callback`: handles `onAppStatusChanged`, `onConnectionStateChanged`, `onGetReport` (returning last keyboard, empty mouse, or last gamepad report), `onSetReport` / `onInterruptData` (acknowledges and syncs Caps Lock LED bit `0x02`).
+  - Implements `BluetoothHidDevice.Callback`: handles `onAppStatusChanged`, `onConnectionStateChanged`, `onVirtualCableUnplug`, `onGetReport` (returning last keyboard, empty mouse, or last gamepad report), `onSetReport` / `onInterruptData` (acknowledges and syncs Caps Lock LED bit `0x02`).
   - **Report ID Invariant:** `BluetoothHidDevice.sendReport(host, id, data)` prepends the Report ID automatically in Android's Bluetooth stack. Always pass raw **8-byte** keyboard (`REPORT_ID_KEYBOARD = 1`), **4-byte** mouse (`REPORT_ID_MOUSE = 2`), and **9-byte** gamepad (`REPORT_ID_GAMEPAD = 3`) arrays; never prepend the Report ID byte manually.
   - `BluetoothPermissions` handles API 31+ runtime permissions (`BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE`); legacy `BLUETOOTH` / `BLUETOOTH_ADMIN` are capped with `maxSdkVersion="30"` in `AndroidManifest.xml`.
+- **`BluetoothGamepadBridgeServer.kt`**:
+  - No-root Classic Bluetooth RFCOMM server (`SERVICE_UUID = 706b6264-5842-4f58-5041-440000000001`) that streams 12-byte checksummed frames (`[0xA5, 0x5A, 9-byte gamepad report, XOR(bytes 2..10)]`) directly to `PocketPadXboxBridge.exe` on Windows, bypassing Windows' cached Bluetooth HID SDP descriptor while coexisting with `BluetoothHidDevice`.
 - **`UsbGadgetManager.kt`**:
   - `detectEnvironment()` probes in a single `su` shell call: `/config/usb_gadget`, `/sys/kernel/config/usb_gadget` (mounting `configfs` if needed), pre-existing `/dev/hidg*` nodes (`EXISTING_HIDG`), legacy `/sys/class/android_usb/android0` (`ANDROID_USB`), and `/dev/gadget` (`hasGadgetFs`).
   - `enable()` saves `getprop sys.usb.config`, sets `sys.usb.config none`, configures `hid.usb0` (keyboard) and best-effort `hid.usb1` (mouse) + `hid.usb2` (gamepad), and falls back from standalone `pocketkeyboard` gadget to `g1` (`configs/b.1` or `c.1`) if `mkdir`/`ln -s` returns `EPERM`.
@@ -62,10 +64,11 @@ Output APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
 ### State Management (`com.pocketkeyboard.viewmodel`)
 - **`KeyboardViewModel.kt`**:
-  - Extends `AndroidViewModel` so `BluetoothHidManager` receives the `Application` context.
-  - Manages `TransportMode` (`BLUETOOTH` default on Android 9+ / API 28+, `USB_ROOT` on API 26–27 or when selected), `ControllerStyle` (`XBOX` default / `PS5`), `bluetoothSnapshot`, `rootAvailable`, `gadgetEnvironment`, `hidArmed`, `mouseAvailable`, `gamepadAvailable`, `connectionStatus`, `holdModifiersMode`, `verticalKeyboardTrackpad`, `trackpadSensitivity`, `shiftActive`, `capsLockActive`, `activeModifiers`, `quickTypeText`, and gamepad state (`gamepadLock`).
+  - Extends `AndroidViewModel` so `BluetoothHidManager` and `BluetoothGamepadBridgeServer` receive the `Application` context.
+  - Manages `TransportMode` (`BLUETOOTH` default on Android 9+ / API 28+, `USB_ROOT` on API 26–27 or when selected), `ControllerStyle` (`XBOX` default / `PS5`), `bluetoothSnapshot`, `bluetoothBridgeHost`, `rootAvailable`, `gadgetEnvironment`, `hidArmed`, `mouseAvailable`, `gamepadAvailable` (can be enabled independently of `_hidArmed` when Direct Bluetooth Bridge is connected), `connectionStatus`, `holdModifiersMode`, `verticalKeyboardTrackpad`, `trackpadSensitivity`, `shiftActive`, `capsLockActive`, `activeModifiers`, `quickTypeText`, and gamepad state (`gamepadLock`).
+  - Synchronizes Bluetooth HID and Direct Bluetooth RFCOMM Bridge via `syncBluetoothSession()` guarded by `btSessionMutex`, routing gamepad reports to both `BluetoothHidManager` and `BluetoothGamepadBridgeServer`.
   - Switching `TransportMode` cleanly disarms/closes the active transport before initializing the target transport; do NOT run `su` probes at startup while in `BLUETOOTH` mode.
-  - `onCleared()` synchronously releases `BluetoothHidManager` and dispatches `HidReportSender.close()` / `UsbGadgetManager.disable()` on `CoroutineScope(Dispatchers.IO)` (never `viewModelScope`, which is already cancelled).
+  - `onCleared()` synchronously releases `BluetoothGamepadBridgeServer` and `BluetoothHidManager`, and dispatches `HidReportSender.close()` / `UsbGadgetManager.disable()` on `CoroutineScope(Dispatchers.IO)` (never `viewModelScope`, which is already cancelled).
 
 ### UI Layer (`com.pocketkeyboard.ui`)
 - **`MainScreen.kt`**: 5-tab Material 3 `TabRow` (`Connect`, `Keyboard`, `Quick`, `Trackpad`, `Gamepad`).
@@ -79,7 +82,10 @@ Output APK: `app/build/outputs/apk/debug/app-debug.apk`.
 - **`ControllerScreen.kt`**: Multi-touch Xbox / PS5 DualSense virtual controller (`BoxWithConstraints` landscape/portrait responsive layout, `DisposableEffect` neutral reset on dispose).
 
 ### Windows PC Xbox Bridge (`pc-xbox-bridge`)
-- **`PocketPadXboxBridge.cpp`**: Standalone native Win32 C++17 bridge using `hid.dll` (`HidP_GetUsages` / `HidP_GetUsageValue`), `setupapi.dll`, and direct `ViGEmBus` IOCTLs (`GUID_DEVINTERFACE_BUSENUM_VIGEM`) to expose PocketKeyboard's Bluetooth/USB HID Gamepad as an Xbox 360 (XInput) controller (`VendorId=0x045E`, `ProductId=0x028E`). Filters out ViGEm virtual devices (`vigem`/`xusb` and `045E:028E` / `054C:05C4`) to avoid loopback, inverts `Y`/`Rz` axes for XInput, and treats `ERROR_NO_MORE_ITEMS` (`259`) as non-fatal. Supports `--test` and `--list`.
+- **`PocketPadXboxBridge.cpp`**: Standalone native Win32 C++17 bridge (`-lhid -lsetupapi -lws2_32 -lbthprops`) that mirrors PocketKeyboard's Gamepad into `ViGEmBus` (`GUID_DEVINTERFACE_BUSENUM_VIGEM`) as an Xbox 360 (XInput) controller (`VendorId=0x045E`, `ProductId=0x028E`). Supports both:
+  1. **HID Gamepads** via `hid.dll` (`HidP_GetUsages` / `HidP_GetUsageValue`, boosting `00001124`/`bthenum`/`1D6B:0104`, filtering out ViGEm virtual devices `045E:028E` / `054C:05C4`), and
+  2. **Bluetooth Direct Bridge** via Winsock `AF_BTH` / `BTHPROTO_RFCOMM` (`GUID_POCKETPAD_RFCOMM_BRIDGE` = `706b6264-5842-4f58-5041-440000000001`), bypassing stale Windows Bluetooth HID SDP caches (`detectStaleBluetoothHidCaches()` scans `HKLM\...\BTHPORT\Parameters\Devices\*\CachedServices`).
+  Treats `ERROR_NO_MORE_ITEMS` (`259`) as non-fatal and supports `--test` and `--list`.
 - **`AndroidManifest.xml`**:
   - Declares `ACCESS_SUPERUSER`, legacy `BLUETOOTH` / `BLUETOOTH_ADMIN` (`maxSdkVersion="30"`), runtime `BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE`, and optional `android.hardware.bluetooth`.
   - `android:windowSoftInputMode="adjustResize|stateHidden"` and `android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"`.

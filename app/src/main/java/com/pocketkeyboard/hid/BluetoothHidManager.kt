@@ -291,6 +291,17 @@ class BluetoothHidManager(
                 onHostCapsLockChanged?.invoke(capsLockOn)
             }
         }
+
+        override fun onVirtualCableUnplug(device: BluetoothDevice) {
+            if (connectingDevice?.address == device.address) {
+                connectingDevice = null
+            }
+            if (connectedDevice?.address == device.address) {
+                connectedDevice = null
+                onHostDisconnected()
+            }
+            refreshState()
+        }
     }
 
     private val bluetoothReceiver = object : BroadcastReceiver() {
@@ -491,8 +502,8 @@ class BluetoothHidManager(
         if (allowQos) {
             val outQos = BluetoothHidDeviceAppQosSettings(
                 BluetoothHidDeviceAppQosSettings.SERVICE_BEST_EFFORT,
-                800,
-                9,
+                2400,
+                64,
                 0,
                 11250,
                 BluetoothHidDeviceAppQosSettings.MAX

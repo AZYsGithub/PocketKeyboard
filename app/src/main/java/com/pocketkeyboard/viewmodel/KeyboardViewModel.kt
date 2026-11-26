@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketkeyboard.hid.BluetoothGamepadBridgeServer
 import com.pocketkeyboard.hid.BluetoothHidManager
 import com.pocketkeyboard.hid.BluetoothHidSnapshot
 import com.pocketkeyboard.hid.BluetoothHidState
@@ -21,6 +22,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class ConnectionStatus {
     DISCONNECTED, CONNECTING, CONNECTED, ERROR
@@ -84,6 +87,9 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     private val _gamepadAvailable = MutableStateFlow(false)
     val gamepadAvailable: StateFlow<Boolean> = _gamepadAvailable.asStateFlow()
 
+    private val _bluetoothBridgeHost = MutableStateFlow<String?>(null)
+    val bluetoothBridgeHost: StateFlow<String?> = _bluetoothBridgeHost.asStateFlow()
+
     private val _connectionStatus = MutableStateFlow(ConnectionStatus.DISCONNECTED)
     val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
 
@@ -140,55 +146,41 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     @Volatile
     private var btHostConnected: Boolean = false
 
+    @Volatile
+    private var btBridgeConnected: Boolean = false
+
+    private var btSenderOpen: Boolean = false
+    private val btSessionMutex = Mutex()
+
     private var bluetoothHidManager: BluetoothHidManager? = null
+    private var bluetoothGamepadBridge: BluetoothGamepadBridgeServer? = null
 
     init {
+        val bridge = BluetoothGamepadBridgeServer(
+            context = application,
+            onConnectionChanged = { connected, hostName ->
+                btBridgeConnected = connected
+                _bluetoothBridgeHost.value = if (connected) (hostName ?: "Windows PC") else null
+                viewModelScope.launch {
+                    syncBluetoothSession()
+                }
+            }
+        )
+        bluetoothGamepadBridge = bridge
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val manager = BluetoothHidManager(
                 context = application,
                 onHostConnected = { _ ->
                     btHostConnected = true
                     viewModelScope.launch {
-                        if (_transportMode.value != TransportMode.BLUETOOTH || !btHostConnected) {
-                            return@launch
-                        }
-                        val activeManager = bluetoothHidManager ?: return@launch
-                        val openResult = HidReportSender.openBluetooth(
-                            sendKbd = activeManager::sendKeyboardReport,
-                            sendMouse = activeManager::sendMouseReport,
-                            sendGamepad = activeManager::sendGamepadReport
-                        )
-                        if (!btHostConnected || _transportMode.value != TransportMode.BLUETOOTH) {
-                            HidReportSender.close()
-                            return@launch
-                        }
-                        if (openResult.isSuccess) {
-                            _hidArmed.value = true
-                            _mouseAvailable.value = true
-                            _gamepadAvailable.value = true
-                            _connectionStatus.value = ConnectionStatus.CONNECTED
-                            _errorMessage.value = null
-                        } else {
-                            _hidArmed.value = false
-                            _mouseAvailable.value = false
-                            _gamepadAvailable.value = false
-                            _connectionStatus.value = ConnectionStatus.ERROR
-                            _errorMessage.value = openResult.exceptionOrNull()?.message
-                        }
+                        syncBluetoothSession()
                     }
                 },
                 onHostDisconnected = {
                     btHostConnected = false
                     viewModelScope.launch {
-                        if (_transportMode.value != TransportMode.BLUETOOTH) {
-                            return@launch
-                        }
-                        HidReportSender.close()
-                        _hidArmed.value = false
-                        _mouseAvailable.value = false
-                        _gamepadAvailable.value = false
-                        _connectionStatus.value = ConnectionStatus.DISCONNECTED
-                        resetInputState()
+                        syncBluetoothSession()
                     }
                 },
                 onHostCapsLockChanged = { capsOn ->
@@ -202,6 +194,20 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
                 manager.snapshot.collect { snap ->
                     _bluetoothSnapshot.value = snap
                     if (_transportMode.value == TransportMode.BLUETOOTH) {
+                        if (snap.state !in setOf(
+                                BluetoothHidState.NO_ADAPTER,
+                                BluetoothHidState.PERMISSION_REQUIRED,
+                                BluetoothHidState.BLUETOOTH_OFF,
+                                BluetoothHidState.UNSUPPORTED
+                            )
+                        ) {
+                            bluetoothGamepadBridge?.start()
+                        } else if (
+                            snap.state == BluetoothHidState.BLUETOOTH_OFF ||
+                            snap.state == BluetoothHidState.PERMISSION_REQUIRED
+                        ) {
+                            bluetoothGamepadBridge?.stop()
+                        }
                         _errorMessage.value = snap.errorMessage
                         _connectionStatus.value = when (snap.state) {
                             BluetoothHidState.CONNECTED -> ConnectionStatus.CONNECTED
@@ -222,6 +228,59 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private suspend fun syncBluetoothSession() = btSessionMutex.withLock {
+        if (_transportMode.value != TransportMode.BLUETOOTH) return@withLock
+
+        val hidActive = btHostConnected
+        val bridgeActive = btBridgeConnected
+
+        if (hidActive || bridgeActive) {
+            if (!btSenderOpen) {
+                val openResult = HidReportSender.openBluetooth(
+                    sendKbd = { report ->
+                        bluetoothHidManager?.sendKeyboardReport(report)
+                            ?: Result.failure(IllegalStateException("Bluetooth HID service is not connected."))
+                    },
+                    sendMouse = { report ->
+                        bluetoothHidManager?.sendMouseReport(report)
+                    },
+                    sendGamepad = { report ->
+                        bluetoothHidManager?.sendGamepadReport(report)
+                        bluetoothGamepadBridge?.sendGamepadReport(report)
+                    }
+                )
+                if (openResult.isSuccess) {
+                    btSenderOpen = true
+                } else {
+                    _hidArmed.value = false
+                    _mouseAvailable.value = false
+                    _gamepadAvailable.value = false
+                    _connectionStatus.value = ConnectionStatus.ERROR
+                    _errorMessage.value = openResult.exceptionOrNull()?.message
+                    return@withLock
+                }
+            }
+
+            _hidArmed.value = hidActive
+            _mouseAvailable.value = hidActive
+            _gamepadAvailable.value = true
+            if (hidActive) {
+                _connectionStatus.value = ConnectionStatus.CONNECTED
+                _errorMessage.value = null
+            }
+        } else {
+            if (btSenderOpen) {
+                HidReportSender.close()
+                btSenderOpen = false
+            }
+            _hidArmed.value = false
+            _mouseAvailable.value = false
+            _gamepadAvailable.value = false
+            _connectionStatus.value = ConnectionStatus.DISCONNECTED
+            resetInputState()
+        }
+    }
+
     // ── Transport switching ──
 
     fun selectTransportMode(mode: TransportMode) {
@@ -239,16 +298,22 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
                 }
 
                 TransportMode.BLUETOOTH -> {
-                    btHostConnected = false
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        bluetoothHidManager?.stop()
+                    btSessionMutex.withLock {
+                        btHostConnected = false
+                        btBridgeConnected = false
+                        _bluetoothBridgeHost.value = null
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            bluetoothHidManager?.stop()
+                        }
+                        bluetoothGamepadBridge?.stop()
+                        HidReportSender.close()
+                        btSenderOpen = false
+                        _hidArmed.value = false
+                        _mouseAvailable.value = false
+                        _gamepadAvailable.value = false
+                        _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                        resetInputState()
                     }
-                    HidReportSender.close()
-                    _hidArmed.value = false
-                    _mouseAvailable.value = false
-                    _gamepadAvailable.value = false
-                    _connectionStatus.value = ConnectionStatus.DISCONNECTED
-                    resetInputState()
                 }
             }
 
@@ -276,22 +341,19 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         }
         if (enable) {
             bluetoothHidManager?.start()
+            bluetoothGamepadBridge?.start()
         } else {
             btHostConnected = false
             bluetoothHidManager?.stop()
             viewModelScope.launch {
-                HidReportSender.close()
+                syncBluetoothSession()
             }
-            _hidArmed.value = false
-            _mouseAvailable.value = false
-            _gamepadAvailable.value = false
-            _connectionStatus.value = ConnectionStatus.DISCONNECTED
-            resetInputState()
         }
     }
 
     fun connectBluetoothHost(address: String) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
+        bluetoothGamepadBridge?.start()
         bluetoothHidManager?.connectToAddress(address)
     }
 
@@ -303,16 +365,32 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     fun refreshBluetoothState(error: String? = null) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         bluetoothHidManager?.refreshState(error = error)
+        if (_transportMode.value == TransportMode.BLUETOOTH) {
+            val state = bluetoothHidManager?.snapshot?.value?.state
+            if (state !in setOf(
+                    BluetoothHidState.NO_ADAPTER,
+                    BluetoothHidState.PERMISSION_REQUIRED,
+                    BluetoothHidState.BLUETOOTH_OFF,
+                    BluetoothHidState.UNSUPPORTED
+                )
+            ) {
+                bluetoothGamepadBridge?.start()
+            }
+        }
     }
 
     fun onBluetoothPermissionsResult(allGranted: Boolean, autoStart: Boolean = false) {
         if (allGranted) {
             refreshBluetoothState()
             _errorMessage.value = null
+            if (_transportMode.value == TransportMode.BLUETOOTH) {
+                bluetoothGamepadBridge?.start()
+            }
             if (autoStart) {
                 toggleBluetoothHid(true)
             }
         } else {
+            bluetoothGamepadBridge?.stop()
             refreshBluetoothState(
                 error = "Bluetooth permission is required to connect as a wireless keyboard & trackpad."
             )
@@ -600,10 +678,10 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         HidReportSender.sendMouseClickAsync(buttonMask, currentMouseButtons)
     }
 
-    // ── PS5 DualSense Gamepad handling ──
+    // ── Xbox / PS5 Gamepad handling ──
 
     fun setGamepadButton(buttonMask: Int, pressed: Boolean) {
-        if (!_hidArmed.value || !_gamepadAvailable.value) return
+        if (!_gamepadAvailable.value) return
         synchronized(gamepadLock) {
             gamepadButtons = if (pressed) {
                 gamepadButtons or buttonMask
@@ -615,7 +693,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setGamepadDpad(hatValue: Int) {
-        if (!_hidArmed.value || !_gamepadAvailable.value) return
+        if (!_gamepadAvailable.value) return
         synchronized(gamepadLock) {
             gamepadHat = hatValue
             dispatchGamepadStateLocked()
@@ -623,7 +701,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setGamepadLeftStick(x: Int, y: Int) {
-        if (!_hidArmed.value || !_gamepadAvailable.value) return
+        if (!_gamepadAvailable.value) return
         synchronized(gamepadLock) {
             gamepadLx = x.coerceIn(0, 255)
             gamepadLy = y.coerceIn(0, 255)
@@ -632,7 +710,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setGamepadRightStick(x: Int, y: Int) {
-        if (!_hidArmed.value || !_gamepadAvailable.value) return
+        if (!_gamepadAvailable.value) return
         synchronized(gamepadLock) {
             gamepadRx = x.coerceIn(0, 255)
             gamepadRy = y.coerceIn(0, 255)
@@ -641,7 +719,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setGamepadTrigger(isRight: Boolean, value: Int) {
-        if (!_hidArmed.value || !_gamepadAvailable.value) return
+        if (!_gamepadAvailable.value) return
         val clamped = value.coerceIn(0, 255)
         synchronized(gamepadLock) {
             val digitalBit = if (isRight) HidGamepadMap.BTN_R2 else HidGamepadMap.BTN_L2
@@ -670,7 +748,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
             gamepadL2 = 0
             gamepadR2 = 0
         }
-        if (_hidArmed.value && _gamepadAvailable.value) {
+        if (_gamepadAvailable.value) {
             HidReportSender.resetGamepadAsync()
         }
     }
@@ -692,6 +770,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
+        bluetoothGamepadBridge?.release()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             bluetoothHidManager?.release()
         }
